@@ -1,6 +1,6 @@
 {
   "name": "split-screen",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Play several URLs at once on a TV, controlled from a PC.",
   "type": "module",
   "main": "server.js",
