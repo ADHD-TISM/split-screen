@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2x2 grid of screens: the app icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp" android:height="96dp"
+    android:viewportWidth="96" android:viewportHeight="96">
+    <path android:fillColor="#0F1115" android:pathData="M0,0h96v96h-96z" />
+    <path android:fillColor="#4F8CFF" android:pathData="M14,18h32v26h-32z" />
+    <path android:fillColor="#3ECF8E" android:pathData="M50,18h32v26h-32z" />
+    <path android:fillColor="#FFB547" android:pathData="M14,48h32v26h-32z" />
+    <path android:fillColor="#FF6B6B" android:pathData="M50,48h32v26h-32z" />
+</vector>

@@ -1,0 +1,11 @@
+state.json
+media/
+dist/
+SplitScreen.exe
+splitscreen.log
+splitscreen.old.log
+state.json.tmp
+node_modules/
+state.dev.json
+state.dev.json.tmp
+NODE-LICENSE.txt

@@ -1,0 +1,39 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'app.splitscreen'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'app.splitscreen'
+        // Fire OS 7 is Android 9 (API 28). API 25 also covers older Fire TV sticks.
+        minSdk 25
+        targetSdk 34
+        versionCode 5
+        versionName '1.4'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Signed with the debug key so it installs by sideloading without extra setup.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    def media3 = '1.4.1'
+    implementation "androidx.media3:media3-exoplayer:$media3"
+    implementation "androidx.media3:media3-exoplayer-hls:$media3"
+    implementation "androidx.media3:media3-ui:$media3"
+    // Document-start scripts: limit YouTube's video format inside each window.
+    implementation 'androidx.webkit:webkit:1.11.0'
+}

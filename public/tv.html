@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Split Screen</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<style>
+  html, body { margin:0; height:100%; background:#000; color:#fff; overflow:hidden; font:24px/1.4 system-ui, sans-serif; cursor:none; }
+  #wall { position:fixed; inset:0; display:grid; gap:4px; background:#000; }
+  .tile { position:relative; overflow:hidden; background:#111; min-width:0; min-height:0; }
+  .tile iframe, .tile video, .tile img { position:absolute; inset:0; width:100%; height:100%; border:0; background:#000; }
+  .tile img, .tile video { object-fit: contain; }
+  .tile.hidden { display:none; }
+  #wall.free { display:block; }
+  #wall.free .tile { position:absolute; outline:2px solid #000; }
+  .tile.small { z-index:2; outline:3px solid #000; }
+  .tag { position:absolute; left:10px; top:8px; z-index:3; padding:2px 10px; border-radius:6px; background:rgba(0,0,0,.65); font-size:20px; opacity:0; transition:opacity .4s; pointer-events:none; }
+  .show-tags .tag, .tile.audible .tag.flash { opacity:1; }
+  .tile.selected::after { content:''; position:absolute; inset:0; border:5px solid #4f8cff; z-index:4; pointer-events:none; }
+  #shield { position:fixed; inset:0; z-index:10; }
+  #idle { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:10px; color:#9aa3b2; z-index:5; }
+  #idle b { color:#fff; font-size:44px; }
+  #banner { position:fixed; left:50%; bottom:40px; transform:translateX(-50%); z-index:11; background:rgba(20,24,32,.92); border:2px solid #4f8cff; border-radius:12px; padding:14px 26px; font-size:26px; }
+  #net { position:fixed; right:16px; top:12px; z-index:11; background:#b33; padding:6px 14px; border-radius:8px; font-size:20px; display:none; }
+</style>
+</head>
+<body>
+<div id="wall"></div>
+<div id="idle"><b>Split Screen</b><div>Ready. Add URLs on the PC control page.</div></div>
+<div id="shield"></div>
+<div id="banner">Press <b>OK</b> on the remote to start sound and full screen</div>
+<div id="net">Reconnecting to the PC…</div>
+
+<script>
+(function () {
+  var wall = document.getElementById('wall');
+  var IDLE_TEXT = document.getElementById('idle').lastElementChild.textContent;   // from the markup
+  var tiles = {};           // id -> { el, media, kind, key, src }
+  var state = { version: 0, layout: 'auto', audio: null, solo: null, windows: [] };
+  var prev = null;
+  var local = { audio: undefined, solo: undefined }; // remote-control overrides on the TV
+  var activated = false;    // a remote press happened: sound is allowed
+  var order = [];           // visible ids in screen order
+  var cols = 1;
+  var selected = -1, selTimer = null;
+
+  // ---------- URL -> player ----------
+  function embed(url) {
+    var u;
+    try { u = new URL(url, location.href); } catch (e) { return { kind: 'iframe', src: url }; }
+    var h = u.hostname.replace(/^(www|m)\./, '');
+    var path = u.pathname;
+
+    if (/(^|\.)youtube(-nocookie)?\.com$/.test(h) || h === 'youtu.be') {
+      var id = null, list = u.searchParams.get('list'), m;
+      if (h === 'youtu.be') id = path.slice(1).split('/')[0];
+      else if (path === '/watch') id = u.searchParams.get('v');
+      else if ((m = path.match(/^\/(embed|shorts|live|v)\/([^\/?#]+)/))) id = m[2];
+      if (id || list) {
+        var q = 'autoplay=1&mute=1&playsinline=1&enablejsapi=1&rel=0&controls=0&origin=' + encodeURIComponent(location.origin);
+        if (list) q += '&list=' + encodeURIComponent(list);
+        else q += '&loop=1&playlist=' + encodeURIComponent(id);
+        var t = parseInt(u.searchParams.get('t') || u.searchParams.get('start') || '0', 10);
+        if (t) q += '&start=' + t;
+        return { kind: 'youtube', src: 'https://www.youtube.com/embed/' + (id ? encodeURIComponent(id) : 'videoseries') + '?' + q };
+      }
+    }
+    if (/(^|\.)vimeo\.com$/.test(h)) {
+      var vm = path.match(/(\d{5,})/);
+      if (vm) return { kind: 'vimeo', src: 'https://player.vimeo.com/video/' + vm[1] + '?autoplay=1&muted=1&loop=1&background=0&api=1' };
+    }
+    // Live streams: .m3u8 anywhere in the path or query (IPTV links often hide it in the query).
+    if (/\.m3u8/i.test(path + u.search) || /\/(playlist|index|master|chunklist)[^\/]*\.m3u8?/i.test(path)) return { kind: 'hls', src: u.href };
+    if (/\.(mp4|webm|ogv|mov|m4v|mkv|mp3|m4a|aac|ogg|wav|flac)$/i.test(path)) return { kind: 'video', src: u.href };
+    if (/\.(jpe?g|png|gif|webp|avif|svg)$/i.test(path)) return { kind: 'image', src: u.href };
+    return { kind: 'iframe', src: u.href };
+  }
+
+  // ---------- layout ----------
+  // Returns one cell per window: {c, r, cs, rs, small} or null (hidden).
+  function placements(n, layout) {
+    var grid = { '1x1': [1, 1], '2x1': [2, 1], '1x2': [1, 2], '2x2': [2, 2], '3x2': [3, 2], '3x3': [3, 3], '4x4': [4, 4] };
+    var cells = [], i;
+    if (layout === 'auto') {
+      grid.auto = n <= 1 ? [1, 1] : n === 2 ? [2, 1] : n <= 4 ? [2, 2] : n <= 6 ? [3, 2] : n <= 9 ? [3, 3] : [4, 4];
+    }
+    if (layout === 'featured' && n > 1) {
+      var side = Math.min(n - 1, 4);
+      cells.push({ c: 1, r: 1, cs: 3, rs: side });
+      for (i = 1; i < n; i++) cells.push(i <= side ? { c: 4, r: i, cs: 1, rs: 1 } : null);
+      return { cols: 4, rows: side, cells: cells };
+    }
+    if (layout === 'pip' && n > 1) {
+      cells.push({ c: 1, r: 1, cs: 4, rs: 4 });
+      for (i = 1; i < n; i++) cells.push(i <= 3 ? { c: 4, r: 5 - i, cs: 1, rs: 1, small: true } : null);
+      return { cols: 4, rows: 4, cells: cells };
+    }
+    var g = grid[layout] || [1, 1];
+    for (i = 0; i < n; i++) cells.push(i < g[0] * g[1] ? { c: (i % g[0]) + 1, r: Math.floor(i / g[0]) + 1, cs: 1, rs: 1 } : null);
+    return { cols: g[0], rows: g[1], cells: cells };
+  }
+
+  // ---------- sound ----------
+  function post(tile, msg) {
+    try { tile.media.contentWindow.postMessage(typeof msg === 'string' ? msg : JSON.stringify(msg), '*'); } catch (e) {}
+  }
+  function applySound(tile, audible) {
+    var on = audible && activated;
+    if (tile.kind === 'video' || tile.kind === 'hls') {
+      tile.media.muted = !on;
+      if (on) tile.media.volume = 1;
+      var p = tile.media.play(); if (p && p.catch) p.catch(function () {});
+    } else if (tile.kind === 'youtube') {
+      post(tile, { event: 'command', func: on ? 'unMute' : 'mute', args: [] });
+      if (on) post(tile, { event: 'command', func: 'setVolume', args: [100] });
+      post(tile, { event: 'command', func: 'playVideo', args: [] });
+    } else if (tile.kind === 'vimeo') {
+      post(tile, { method: 'setMuted', value: !on });
+      if (on) post(tile, { method: 'setVolume', value: 1 });
+      post(tile, { method: 'play' });
+    }
+    // Web pages: sound is not controllable.
+  }
+
+  function effective() {
+    return {
+      audio: local.audio !== undefined ? local.audio : state.audio,
+      solo: local.solo !== undefined ? local.solo : state.solo,
+    };
+  }
+
+  // ---------- tiles ----------
+  function build(w) {
+    var e = embed(w.url);
+    var el = document.createElement('div');
+    el.className = 'tile';
+    var media;
+    var streamUrl = null;
+    if (e.kind === 'video' || e.kind === 'hls') {
+      media = document.createElement('video');
+      media.autoplay = true; media.muted = true; media.loop = e.kind === 'video'; media.playsInline = true;
+      media.setAttribute('playsinline', '');
+      streamUrl = e.src;
+    } else if (e.kind === 'image') {
+      media = document.createElement('img'); media.src = e.src; media.alt = '';
+    } else {
+      media = document.createElement('iframe');
+      media.src = e.src;
+      media.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
+      media.setAttribute('allowfullscreen', '');
+      media.setAttribute('tabindex', '-1');
+      media.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+    }
+    var tag = document.createElement('div'); tag.className = 'tag';
+    el.appendChild(media); el.appendChild(tag);
+    wall.appendChild(el);
+    var tile = { el: el, media: media, tag: tag, kind: e.kind, src: e.src, key: w.url + '#' + w.nonce, status: 'loading' };
+    if (streamUrl) startStream(tile, streamUrl, e.kind === 'hls');
+    if (e.kind === 'image') {
+      media.onload = function () { tile.status = 'showing'; };
+      media.onerror = function () { tile.status = 'error: image did not load'; };
+    }
+    if (media.tagName === 'IFRAME') {
+      media.addEventListener('load', function () { tile.status = 'page loaded'; });
+      media.addEventListener('load', function () {
+        // The player needs a moment after load before it accepts commands.
+        setTimeout(function () { applySound(tile, effective().audio === w.id); }, 800);
+        setTimeout(function () { applySound(tile, effective().audio === w.id); }, 3000);
+      });
+    }
+    return tile;
+  }
+
+  // ---------- live streams and video files ----------
+  var hlsLoading = null;
+  function ensureHls(cb) {
+    if (window.Hls) return cb();
+    if (!hlsLoading) {
+      hlsLoading = new Promise(function (ok) {
+        var s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js';
+        s.onload = ok; s.onerror = ok;   // On failure, the browser's own player is used.
+        document.head.appendChild(s);
+      });
+    }
+    hlsLoading.then(cb);
+  }
+
+  // Plays a stream and keeps it playing.
+  // - If the stream refuses to play on the TV, it switches to the PC relay (/relay).
+  // - If the stream drops or freezes, it reconnects: after 3 s, then up to every 30 s.
+  function startStream(tile, url, isHls) {
+    var v = tile.media;
+    var local = url.charAt(0) === '/';      // a file on the PC: no relay needed
+    var viaPc = false, locked = false;      // locked: this mode has played once, keep it
+    var hls = null, fails = 0, timer = null, everPlayed = false;
+    var mode = function () { return viaPc ? ' (via PC)' : ''; };
+
+    function stopPlayer() {
+      if (hls) { try { hls.destroy(); } catch (e) {} hls = null; }
+    }
+    function retry(reason) {
+      if (tile.dead) return;
+      stopPlayer();
+      clearTimeout(timer);
+      fails++;
+      // Not played yet: try the other path (direct <-> via PC) right away.
+      if (!locked && !local && fails <= 2) { viaPc = !viaPc; tile.status = reason + ', trying' + (viaPc ? ' via PC' : ' direct'); timer = setTimeout(play, 300); return; }
+      var wait = Math.min(30, 3 * fails);
+      tile.status = reason + mode() + ', retry in ' + wait + ' s';
+      timer = setTimeout(play, wait * 1000);
+    }
+    function play() {
+      if (tile.dead) return;
+      tile.status = 'connecting' + mode();
+      var src = viaPc ? '/relay?u=' + encodeURIComponent(url) : url;
+      if (isHls && window.Hls && window.Hls.isSupported()) {
+        hls = new window.Hls({ liveDurationInfinity: true, manifestLoadingMaxRetry: 1, levelLoadingMaxRetry: 3, fragLoadingMaxRetry: 4 });
+        var recovered = false;
+        hls.on(window.Hls.Events.ERROR, function (ev, d) {
+          if (!d.fatal) return;
+          if (d.type === window.Hls.ErrorTypes.MEDIA_ERROR && !recovered) { recovered = true; hls.recoverMediaError(); return; }
+          var blocked = d.response && d.response.code === 0;
+          retry(d.type === window.Hls.ErrorTypes.NETWORK_ERROR ? (blocked ? 'blocked or offline' : 'network error') : 'stream error');
+        });
+        hls.loadSource(src);
+        hls.attachMedia(v);
+      } else {
+        v.src = src;
+        v.load();
+      }
+      var p = v.play(); if (p && p.catch) p.catch(function () {});
+    }
+
+    v.addEventListener('playing', function () {
+      fails = 0; everPlayed = true;
+      if (!local) locked = true;
+      tile.status = 'playing' + mode();
+    });
+    v.addEventListener('waiting', function () { if (everPlayed) tile.status = 'buffering' + mode(); });
+    v.addEventListener('error', function () { if (!hls && v.getAttribute('src')) retry('cannot play'); });
+    v.addEventListener('ended', function () { if (isHls) retry('stream ended'); });
+
+    // Watchdog: if the picture freezes for 20 s, reconnect.
+    var lastTime = -1, still = 0;
+    tile.watch = setInterval(function () {
+      if (tile.dead || v.readyState === 0 && !everPlayed) return;
+      if (v.currentTime !== lastTime) { lastTime = v.currentTime; still = 0; return; }
+      if (!v.paused || v.readyState < 3) { still += 5; if (still >= 20) { still = 0; retry('frozen'); } }
+    }, 5000);
+
+    tile.stop = function () {
+      tile.dead = true;
+      clearTimeout(timer); clearInterval(tile.watch);
+      stopPlayer();
+      v.removeAttribute('src'); try { v.load(); } catch (e) {}
+    };
+
+    if (isHls) ensureHls(play); else play();
+  }
+
+  // Tell the PC what each window is doing, every 5 s.
+  setInterval(function () {
+    var report = {};
+    state.windows.forEach(function (w) { if (tiles[w.id]) report[w.id] = String(tiles[w.id].status || ''); });
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/report');
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(JSON.stringify({ statuses: report }));
+  }, 5000);
+
+  function render() {
+    var eff = effective();
+    var wins = state.windows;
+    var idle = document.getElementById('idle');
+    idle.style.display = wins.length ? 'none' : 'flex';
+    // "stopped": Split Screen was stopped on the PC; its window list arrives again on restart.
+    idle.lastElementChild.textContent = state.stopped
+      ? 'Split Screen was stopped on the PC. Start SplitScreen.exe on the PC to show the windows again.'
+      : IDLE_TEXT;
+
+    // Remove tiles that are gone or whose URL / reload counter changed.
+    var keep = {};
+    wins.forEach(function (w) { keep[w.id] = w.url + '#' + w.nonce; });
+    Object.keys(tiles).forEach(function (id) {
+      var t = tiles[id];
+      if (keep[id] !== t.key) {
+        if (t.stop) t.stop();
+        wall.removeChild(t.el); delete tiles[id];
+      }
+    });
+
+    var shown = eff.solo ? wins.filter(function (w) { return w.id === eff.solo; }) : wins;
+    var free = state.layout === 'free' && !eff.solo;
+    wall.classList.toggle('free', free);
+    var pl = placements(shown.length, eff.solo || free ? '1x1' : state.layout);
+    wall.style.gridTemplateColumns = 'repeat(' + pl.cols + ', minmax(0, 1fr))';
+    wall.style.gridTemplateRows = 'repeat(' + pl.rows + ', minmax(0, 1fr))';
+    wall.style.gap = pl.cols === 1 && pl.rows === 1 ? '0' : '4px';
+    cols = pl.cols;
+    order = [];
+
+    wins.forEach(function (w, i) {
+      var audible = eff.audio === w.id;
+      var t = tiles[w.id] || (tiles[w.id] = build(w));
+      var idx = shown.indexOf(w);
+      var cell = idx >= 0 ? (free ? {} : pl.cells[idx]) : null;
+      t.el.className = 'tile' + (cell ? '' : ' hidden') + (cell && cell.small ? ' small' : '') + (audible ? ' audible' : '');
+      var r = free && w.rect;
+      t.el.style.left = r ? r.x * 100 + '%' : '';
+      t.el.style.top = r ? r.y * 100 + '%' : '';
+      t.el.style.width = r ? r.w * 100 + '%' : '';
+      t.el.style.height = r ? r.h * 100 + '%' : '';
+      t.el.style.zIndex = free ? String((w.z || 0) + 1) : '';
+      if (free) {
+        if (!r) { t.el.style.left = t.el.style.top = '0'; t.el.style.width = t.el.style.height = '100%'; }
+        order.push(w.id);
+      } else if (cell) {
+        t.el.style.gridColumn = cell.c + ' / span ' + cell.cs;
+        t.el.style.gridRow = cell.r + ' / span ' + cell.rs;
+        order.push(w.id);
+      }
+      t.tag.textContent = (i + 1) + (audible ? '  🔊' : '');
+      // Windows hidden by "Full" mode stay loaded but always muted.
+      applySound(t, audible && !!cell);
+    });
+    markSelected();
+  }
+
+  // ---------- sync with the PC ----------
+  function poll() {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/api/state?tv=1&v=' + state.version);
+    xhr.timeout = 35000;
+    xhr.onload = function () {
+      document.getElementById('net').style.display = 'none';
+      try {
+        var next = JSON.parse(xhr.responseText);
+        if (next.version !== state.version) {
+          prev = state; state = next;
+          // Any change made on the PC wins over choices made with the TV remote.
+          local.audio = undefined; local.solo = undefined;
+          render();
+        }
+      } catch (e) {}
+      setTimeout(poll, 100);
+    };
+    xhr.onerror = xhr.ontimeout = function () {
+      // After a stop on the PC the page already says so: no "Reconnecting" banner on top.
+      document.getElementById('net').style.display = state.stopped ? 'none' : 'block';
+      setTimeout(poll, 3000);
+    };
+    xhr.send();
+  }
+
+  // ---------- remote control ----------
+  // ---------- full screen ----------
+  function isFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement) ||
+      (window.innerHeight >= screen.height - 2 && window.innerWidth >= screen.width - 2);
+  }
+  function goFullscreen() {
+    if (document.fullscreenElement || document.webkitFullscreenElement) return;
+    var de = document.documentElement;
+    var fs = de.requestFullscreen || de.webkitRequestFullscreen;
+    if (!fs) return;
+    try { var p = fs.call(de, { navigationUI: 'hide' }); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+  }
+  function updateBanner() {
+    var b = document.getElementById('banner');
+    if (!activated) { b.innerHTML = 'Press <b>OK</b> on the remote to start sound and full screen'; b.style.display = 'block'; }
+    else if (!isFullscreen()) { b.innerHTML = 'Press any button for full screen'; b.style.display = 'block'; }
+    else b.style.display = 'none';
+  }
+  // Any button, click, or touch puts the page back in full screen.
+  ['keydown', 'click', 'touchstart'].forEach(function (type) {
+    window.addEventListener(type, goFullscreen, true);
+  });
+  document.addEventListener('fullscreenchange', updateBanner);
+  document.addEventListener('webkitfullscreenchange', updateBanner);
+  window.addEventListener('resize', updateBanner);
+  // Kiosk browsers and installed home-screen apps allow full screen without a press.
+  goFullscreen();
+  setTimeout(updateBanner, 500);
+
+  function activate() {
+    if (!activated) {
+      activated = true;
+      updateBanner();
+      if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(function () {});
+      render();
+      return true;
+    }
+    return false;
+  }
+
+  function markSelected() {
+    Object.keys(tiles).forEach(function (id) {
+      tiles[id].el.classList.toggle('selected', selected >= 0 && order[selected] === id);
+    });
+    document.body.classList.toggle('show-tags', selected >= 0);
+  }
+  function select(i) {
+    if (!order.length) return;
+    selected = (i + order.length) % order.length;
+    markSelected();
+    clearTimeout(selTimer);
+    selTimer = setTimeout(function () { selected = -1; markSelected(); }, 6000);
+  }
+
+  document.addEventListener('keydown', function (e) {
+    var k = e.key || '', code = e.keyCode;
+    var ok = k === 'Enter' || code === 13 || code === 23;
+    if (activate() && ok) { e.preventDefault(); return; }
+    if (k === 'ArrowRight' || code === 39) { select(selected < 0 ? 0 : selected + 1); e.preventDefault(); }
+    else if (k === 'ArrowLeft' || code === 37) { select(selected < 0 ? 0 : selected - 1); e.preventDefault(); }
+    else if (k === 'ArrowDown' || code === 40) { select(selected < 0 ? 0 : selected + cols); e.preventDefault(); }
+    else if (k === 'ArrowUp' || code === 38) { select(selected < 0 ? 0 : selected - cols); e.preventDefault(); }
+    else if (ok) {
+      e.preventDefault();
+      if (selected < 0) { select(0); return; }
+      var id = order[selected], eff = effective();
+      // OK on a window: 1st press = sound from it, 2nd press = full screen it / back to the wall.
+      if (eff.audio !== id) local.audio = id;
+      else local.solo = eff.solo === id ? null : id;
+      render(); select(Math.max(0, order.indexOf(id)));
+    }
+  });
+
+  // Click (TV pointer or mouse): select the window under the pointer.
+  document.getElementById('shield').addEventListener('click', function (e) {
+    if (activate()) return;
+    var hit = document.elementsFromPoint ? document.elementsFromPoint(e.clientX, e.clientY) : [];
+    for (var i = 0; i < hit.length; i++) {
+      var idx = -1;
+      Object.keys(tiles).forEach(function (id) { if (tiles[id].el === hit[i]) idx = order.indexOf(id); });
+      if (idx >= 0) {
+        var id = order[idx], eff = effective();
+        if (eff.audio !== id) local.audio = id; else local.solo = eff.solo === id ? null : id;
+        render(); select(Math.max(0, order.indexOf(id)));
+        return;
+      }
+    }
+  });
+
+  // Keep remote key presses on this page, not inside an embedded player.
+  setInterval(function () {
+    var a = document.activeElement;
+    if (a && a.tagName === 'IFRAME') { a.blur(); window.focus(); }
+  }, 1000);
+
+  poll();
+})();
+</script>
+</body>
+</html>
