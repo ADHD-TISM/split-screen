@@ -157,11 +157,7 @@ async function saveState(text) {
 function setState(next) {
   state = { ...next, version: state.version + 1 };
   inputs = [];   // clicks and scrolls were meant for the old window list
-  // A picture of a window that is gone, or now shows another page, is dropped.
-  for (const [id, s] of snapshots) {
-    const w = state.windows.find((x) => x.id === id);
-    if (!w || windowKey(w) !== s.key) snapshots.delete(id);
-  }
+  screen = null;   // the TV's picture showed the old list; the next one comes within moments
   const text = JSON.stringify(state, null, 2);
   unsavedText = text;   // the newest list; cleared when exactly this text reaches state.json
   saving = saving.then(() => saveState(text));
@@ -758,23 +754,27 @@ function freshInputs() {
 // Mouse moves only go to apps that know them (1.7 and later send "key"). App 1.6 would give
 // each move a gesture slot and run later clicks seconds late.
 // Pictures are asked only of that same app ("moves": the one that holds the place).
-const tvState = (moves) => ({ ...state, inputsFrom, inputs: freshInputs().filter((i) => moves || i.kind !== 'move'), snap: !!moves && snapWanted() });
+// Moves (app 1.7) and whole-screen inputs ("screen", app 1.8) go only to the keyed app holding
+// the place; older apps would queue them for nothing.
+const forOldApps = (i) => i.kind !== 'move' && !i.screen;
+const tvState = (moves) => ({ ...state, inputsFrom, inputs: freshInputs().filter((i) => moves || forOldApps(i)), snap: !!moves && snapWanted() });
 
-// ---------- window pictures from the TV (live preview) ----------
-// The TV app sends a small JPEG of each window (POST /api/snapshot) while someone watches the
-// preview. Only the TV app that polls (its address and random key, see noteTvApp) may send
-// them; only this PC (or, with ALLOW_REMOTE_CONTROL, other devices) may see them. They are
-// kept in memory, 1 per window.
-const MAX_SNAPSHOT_BYTES = 300 * 1024;
-// A picture is shown while it is this new, or (with many windows, where 1 round takes longer)
-// up to SNAPSHOT_KEEP_MS while the TV still sends pictures. Older: the preview shows its own copy.
-const SNAPSHOT_FRESH_MS = 5000;
-const SNAPSHOT_KEEP_MS = 20000;
-let lastSnapshotAt = 0;
+// ---------- the TV's screen (live preview) ----------
+// While someone watches the preview, the TV app sends a JPEG of its whole screen (POST
+// /api/screen) again and again, as fast as it can up to 8 a second. The preview asks for the
+// next one (GET /api/screen?after=N) and gets it as soon as it arrives. Only the TV app that
+// polls (its address and random key, see noteTvApp) may send; only this PC (or, with
+// ALLOW_REMOTE_CONTROL, other devices) may see. Only the newest picture is kept, in memory.
+const MAX_SCREEN_BYTES = 600 * 1024;
+const SCREEN_FRESH_MS = 3000;        // older: the preview shows its own copy of the windows
+const SCREEN_WAIT_MS = 3000;         // how long a GET waits for the next picture
 // A stalled upload (the TV lost Wi-Fi) is ended after this. Shorter in the tests.
 const SNAPSHOT_UPLOAD_TIMEOUT_MS = Math.min(60000, Math.max(200, Number(process.env.SNAPSHOT_UPLOAD_TIMEOUT_MS) || 10000));
 const SNAPSHOT_WANTED_MS = 5000;     // the TV stops capturing this long after the preview stops asking
-const snapshots = new Map();         // window id -> { jpeg, at, key }
+let screen = null;                   // { jpeg, seq, at }
+let screenSeq = 0;
+const screenWaiters = new Set();     // GETs waiting for the next picture
+const MAX_SCREEN_WAITERS = 16;       // more get their answer (or 204) at once
 let snapshotsAskedAt = 0;
 let snapshotUploading = false;       // 1 upload at a time
 // The TV app that may send pictures: its address and the random key it polls with. Another
@@ -796,7 +796,6 @@ function crossSite(req) {
   if (origin) { try { return new URL(origin).host !== req.headers.host; } catch { return true; } }
   return false;
 }
-const windowKey = (w) => w.url + '#' + w.nonce;
 function askSnapshots() {
   const was = snapWanted();
   snapshotsAskedAt = Date.now();
@@ -810,7 +809,7 @@ function pushInput(input) {
   inputs = inputs.slice(-(MAX_INPUTS - 1));
   inputs.push({ ...input, seq: ++inputSeq, at: Date.now() });
   // Wake only the TV apps that take inputs (moves: only those that know them).
-  for (const w of [...waiters]) if (w.inputs && (input.kind !== 'move' || w.moves)) w(tvState(w.moves));
+  for (const w of [...waiters]) if (w.inputs && (forOldApps(input) || w.moves)) w(tvState(w.moves));
 }
 
 // ---------- routes ----------
@@ -851,7 +850,7 @@ const server = http.createServer(async (req, res) => {
       const keyed = hasKey && !!tvApp && tvApp.address === req.socket.remoteAddress && tvApp.key === appKey;
       const current = () => (wantsInputs ? tvState(keyed) : state);
       const newInput = wantsInputs && inputs.length > 0 && Number.isFinite(seen)
-        && freshInputs().some((i) => i.seq > seen && (keyed || i.kind !== 'move'));
+        && freshInputs().some((i) => i.seq > seen && (keyed || forOldApps(i)));
       // "snap" is whether the app sends pictures now: answer at once when that should change.
       const snapNow = url.searchParams.get('snap');
       const snapChange = keyed && (snapNow === '0' || snapNow === '1') && (snapNow === '1') !== snapWanted();
@@ -881,49 +880,72 @@ const server = http.createServer(async (req, res) => {
       if (!isJson(req)) return send(res, 415, { error: 'Send JSON.' });
       if (stopping) return send(res, 503, { error: 'Split Screen is stopping.' });
       const b = JSON.parse(await readBody(req));
-      const id = String(b?.id ?? '');
-      if (!state.windows.some((w) => w.id === id)) return send(res, 400, { error: 'No such window.' });
+      // "screen": x and y are a part of the whole TV screen (the preview shows the TV's own
+      // picture, which may differ from the PC's layout); the TV app finds the window there.
+      // Otherwise they are a part of the window "id".
+      const onScreen = b?.screen === true;
+      const id = onScreen ? '' : String(b?.id ?? '');
+      if (!onScreen && !state.windows.some((w) => w.id === id)) return send(res, 400, { error: 'No such window.' });
       const part = (v) => (Number.isFinite(v) ? Math.min(1, Math.max(0, Math.round(v * 10000) / 10000)) : null);
       const x = part(b.x), y = part(b.y);
       if (x === null || y === null) return send(res, 400, { error: 'Bad position.' });
       const dy = Number.isFinite(b.dy) ? Math.min(3, Math.max(-3, Math.round(b.dy * 1000) / 1000)) : 0;
-      if (b.kind === 'tap' || b.kind === 'move') pushInput({ id, kind: b.kind, x, y });
-      else if (b.kind === 'scroll' && dy !== 0) pushInput({ id, kind: 'scroll', x, y, dy });
+      const where = onScreen ? { screen: true, x, y } : { id, x, y };
+      if (b.kind === 'tap' || b.kind === 'move') pushInput({ ...where, kind: b.kind });
+      else if (b.kind === 'scroll' && dy !== 0) pushInput({ ...where, kind: 'scroll', dy });
       else return send(res, 400, { error: 'Bad input.' });
       return send(res, 200, { ok: true });
     }
     if (p === '/api/snapshot' && req.method === 'POST') {
-      // A JPEG of 1 window, from the TV app. The answer says whether to keep sending.
+      // Pictures from an older app (1.7, per window). Not shown any more: tell it to stop.
+      req.resume();
+      return send(res, 200, { wanted: false });
+    }
+    if (p === '/api/screen' && req.method === 'POST') {
+      // A JPEG of the TV's screen, from the TV app. The answer says whether to keep sending.
       if (crossSite(req) || !tvApp || req.socket.remoteAddress !== tvApp.address || url.searchParams.get('key') !== tvApp.key) {
         return send(res, 403, { error: 'Only the TV app sends pictures.' });
       }
-      const id = url.searchParams.get('id') || '';
       if (snapshotUploading) return send(res, 429, { error: 'One picture at a time.' });
       snapshotUploading = true;
       // A stalled upload (the TV lost Wi-Fi) must not block the next ones for minutes.
       req.setTimeout(SNAPSHOT_UPLOAD_TIMEOUT_MS, () => req.destroy(new Error('Upload too slow.')));
       let jpeg;
-      try { jpeg = await readBody(req, MAX_SNAPSHOT_BYTES, true); } finally { snapshotUploading = false; }
+      try { jpeg = await readBody(req, MAX_SCREEN_BYTES, true); } finally { snapshotUploading = false; }
       if (jpeg.length < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 || jpeg[2] !== 0xff) return send(res, 400, { error: 'Send a JPEG.' });
-      lastSnapshotAt = Date.now();
-      // Kept only for a window that is still the same, in the list the TV had when it took
-      // the picture ("v"). A picture of a window that is gone or changed is dropped, without
-      // an error: the TV keeps sending the others.
-      const w = state.windows.find((x) => x.id === id);
-      if (w && Number(url.searchParams.get('v')) === state.version) snapshots.set(id, { jpeg, at: lastSnapshotAt, key: windowKey(w) });
+      // Kept only when it shows the window list the PC has now ("v"): one taken before a
+      // change would show the old windows. It is dropped without an error.
+      if (Number(url.searchParams.get('v')) === state.version) {
+        screen = { jpeg, seq: ++screenSeq, at: Date.now() };
+        for (const w of [...screenWaiters]) w();
+      }
       return send(res, 200, { wanted: snapWanted() });
     }
-    if (p === '/api/snapshot' && req.method === 'GET') {
-      // The newest picture of 1 window, for the preview. Asking also tells the TV to send them.
+    if (p === '/api/screen' && req.method === 'GET') {
+      // The TV's newest picture after number "after", for the preview: at once when there is
+      // one, else when it comes (up to SCREEN_WAIT_MS), else 204. Asking also tells the TV to
+      // send pictures. The number is in the X-Screen-Seq header.
       if (!isLocal(req) && !ALLOW_REMOTE_CONTROL) return send(res, 403, { error: 'Control is allowed from this PC only.' });
       if (crossSite(req)) return send(res, 403, { error: 'Not from another site.' });
       askSnapshots();
-      const s = snapshots.get(url.searchParams.get('id') || '');
-      const now = Date.now();
-      const fresh = s && (now - s.at < SNAPSHOT_FRESH_MS || (now - lastSnapshotAt < SNAPSHOT_FRESH_MS && now - s.at < SNAPSHOT_KEEP_MS));
-      if (!fresh) return send(res, 404, { error: 'No recent picture.' });
-      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': 'sandbox' });
-      return res.end(s.jpeg);
+      // A number from before a restart (higher than any now) counts as 0.
+      let after = Number(url.searchParams.get('after')) || 0;
+      if (after > screenSeq) after = 0;
+      const ready = () => screen && screen.seq > after && Date.now() - screen.at < SCREEN_FRESH_MS;
+      const answer = () => {
+        if (res.writableEnded) return;
+        if (!ready()) { res.writeHead(204, { 'Cache-Control': 'no-store' }); return res.end(); }
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': 'sandbox', 'X-Screen-Seq': String(screen.seq) });
+        res.end(screen.jpeg);
+      };
+      if (ready()) return answer();
+      if (screenWaiters.size >= MAX_SCREEN_WAITERS) return send(res, 429, { error: 'Too many waiting.' });
+      const done = () => { clearTimeout(t); screenWaiters.delete(done); answer(); };
+      const t = setTimeout(done, SCREEN_WAIT_MS);
+      screenWaiters.add(done);
+      req.on('close', () => { clearTimeout(t); screenWaiters.delete(done); });
+      return;
     }
     if (p === '/api/info' && req.method === 'GET') {
       const tvSecondsAgo = tvLastSeen ? Math.round((Date.now() - tvLastSeen) / 1000) : null;

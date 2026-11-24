@@ -32,8 +32,8 @@
   body.preview #shield { cursor:pointer; }
   .ping { position:fixed; z-index:12; width:24px; height:24px; margin:-12px 0 0 -12px; border:3px solid #4f8cff; border-radius:50%; pointer-events:none; animation:ping .5s ease-out forwards; }
   .ping.bad { border-color:#ff6b6b; }
-  /* z-index 1: above the window's own content, below small windows on top (z-index 2). */
-  .tile img.snap { display:none; z-index:1; object-fit:fill; }
+  /* The TV's screen picture: over all windows (and the idle text), under the click shield. */
+  #screen { position:fixed; inset:0; width:100%; height:100%; z-index:6; display:none; object-fit:fill; pointer-events:none; background:#000; }
   @keyframes ping { from { transform:scale(.4); opacity:1; } to { transform:scale(1.6); opacity:0; } }
 </style>
 </head>
@@ -358,6 +358,8 @@
         var next = JSON.parse(xhr.responseText);
         if (next.version !== state.version) {
           prev = state; state = next;
+          // The TV's last picture shows the old windows: hide it until a new one comes.
+          if (PREVIEW) { var si = document.getElementById('screen'); if (si) si.style.display = 'none'; }
           // Any change made on the PC wins over choices made with the TV remote.
           local.audio = undefined; local.solo = undefined;
           render();
@@ -498,63 +500,100 @@
       if (x != null) xhr.onloadend = function () { mark(x, y, xhr.status === 200); };
       xhr.send(JSON.stringify(o));
     };
-    // The mouse over a window: the TV's arrow follows it (at most 8 times a second). The TV
-    // hides the arrow after 10 s without a move.
+    // The mouse over a window: the TV's arrow follows it (at most 20 times a second; the TV
+    // glides between them). The TV hides the arrow after 10 s without a move.
+    // Where a spot in the preview is on the TV. While the TV's own picture shows, as a part of
+    // the whole screen (the TV finds the window there, even when its remote made 1 window full
+    // screen). Else as a part of the window under it, by this page's layout. "h" is the height
+    // that a scroll is measured in.
+    var spotAt = function (x, y) {
+      if (screenImg.style.display === 'block') {
+        // The key changes when the mouse moves on by about 3% of the screen, so a wheel turn
+        // over another window is sent on its own.
+        var sx = x / window.innerWidth, sy = y / window.innerHeight;
+        return { key: 'screen' + Math.round(sx * 33) + ',' + Math.round(sy * 33), where: { screen: true, x: sx, y: sy }, h: window.innerHeight };
+      }
+      var t = tileAt(x, y);
+      return t && { key: t.id, where: { id: t.id, x: (x - t.r.left) / t.r.width, y: (y - t.r.top) / t.r.height }, h: t.r.height };
+    };
+    var withKind = function (where, kind) { var o = { kind: kind }; for (var k in where) o[k] = where[k]; return o; };
     var lastMove = 0, moveTimer = null, moveAt = null;
     var sendMove = function () {
       moveTimer = null; lastMove = Date.now();
-      var t = moveAt && tileAt(moveAt.x, moveAt.y);
-      if (t) sendInput({ id: t.id, kind: 'move', x: (moveAt.x - t.r.left) / t.r.width, y: (moveAt.y - t.r.top) / t.r.height });
+      var s = moveAt && spotAt(moveAt.x, moveAt.y);
+      if (s) sendInput(withKind(s.where, 'move'));
     };
     shield.addEventListener('mousemove', function (e) {
       moveAt = { x: e.clientX, y: e.clientY };
-      if (!moveTimer) moveTimer = setTimeout(sendMove, Math.max(0, 125 - (Date.now() - lastMove)));
+      if (!moveTimer) moveTimer = setTimeout(sendMove, Math.max(0, 50 - (Date.now() - lastMove)));
     });
 
-    // Pictures of the windows from the TV app, about every second. While a window has a recent
-    // picture, it covers this page's own copy, so the preview shows what the TV really shows.
-    // Without the TV app (or with an older one) no pictures come, and the own copy shows.
-    setInterval(function () {
-      if (document.hidden) return;
-      order.forEach(function (id) {
-        var t = tiles[id];
-        if (!t || t.snapLoading) return;
-        if (!t.snap) {
-          t.snap = document.createElement('img');
-          t.snap.className = 'snap';
-          t.el.appendChild(t.snap);
-        }
-        var img = new Image();
-        t.snapLoading = true;
-        img.onload = function () { t.snapLoading = false; t.snap.src = img.src; t.snap.style.display = 'block'; };
-        img.onerror = function () { t.snapLoading = false; t.snap.style.display = 'none'; };
-        img.src = '/api/snapshot?id=' + encodeURIComponent(id) + '&t=' + Date.now();
+    // The TV's screen from the TV app: each new picture is fetched as soon as it arrives on the
+    // PC (GET /api/screen waits for it). It covers this page's own copy of the windows, so the
+    // preview shows what the TV really shows. Without pictures (no app, an older one, or
+    // Allow PC control off) it hides and the own copy shows.
+    var screenImg = document.createElement('img');
+    screenImg.id = 'screen';
+    document.body.appendChild(screenImg);
+    var frame = 0, shownUrl = null, empties = 0;
+    // Shows 1 picture and resolves once it is on screen (or failed), so the next request
+    // starts only then. Every link but the one shown is freed.
+    var showFrame = function (b) {
+      return new Promise(function (done) {
+        var u = URL.createObjectURL(b);
+        var stop = setTimeout(function () { URL.revokeObjectURL(u); screenImg.style.display = 'none'; done(); }, 5000);   // never loaded
+        screenImg.onload = function () {
+          clearTimeout(stop);
+          if (shownUrl) URL.revokeObjectURL(shownUrl);
+          shownUrl = u; screenImg.style.display = 'block'; done();
+        };
+        screenImg.onerror = function () { clearTimeout(stop); URL.revokeObjectURL(u); screenImg.style.display = 'none'; done(); };
+        screenImg.src = u;
       });
-    }, 1000);
+    };
+    var nextFrame = function () {
+      if (document.hidden) { setTimeout(nextFrame, 1000); return; }
+      var wait = 0, asked = Date.now();
+      fetch('/api/screen?after=' + frame, { cache: 'no-store' }).then(function (r) {
+        // 204: no new picture came. If it came back fast (the PC had too many waiting), wait a bit.
+        // The picture stays through 1 empty answer (a slow network), and hides after 2.
+        if (r.status !== 200) {
+          empties++;
+          if (r.status !== 204 || empties >= 2) screenImg.style.display = 'none';
+          wait = r.status !== 204 ? 3000 : (Date.now() - asked < 500 ? 300 : 0);
+          return null;
+        }
+        empties = 0;
+        frame = Number(r.headers.get('X-Screen-Seq')) || frame;
+        return r.blob();
+      }).then(function (b) { return b && showFrame(b); })
+        .catch(function () { wait = 3000; }).then(function () { setTimeout(nextFrame, wait); });
+    };
+    nextFrame();
 
     shield.addEventListener('click', function (e) {
-      var t = tileAt(e.clientX, e.clientY);
-      if (!t) return;
-      sendInput({ id: t.id, kind: 'tap', x: (e.clientX - t.r.left) / t.r.width, y: (e.clientY - t.r.top) / t.r.height }, e.clientX, e.clientY);
+      var s = spotAt(e.clientX, e.clientY);
+      if (s) sendInput(withKind(s.where, 'tap'), e.clientX, e.clientY);
     });
-    // Wheel turns on 1 window are added up and sent at most 4 times a second. That is longer
-    // than 1 drag on the TV (about 240 ms), so drags do not cut each other short.
+    // Wheel turns on 1 spot are added up and sent at most 4 times a second. That is longer
+    // than 1 drag on the TV (about 240 ms), so drags do not cut each other short. dy is in
+    // heights of the window (or, on the TV's picture, of the screen).
     var wheel = null, wheelTimer = null;
     var flushWheel = function () {
       clearTimeout(wheelTimer); wheelTimer = null;
-      if (wheel && Math.abs(wheel.dy) >= 0.001) sendInput({ id: wheel.id, kind: 'scroll', x: wheel.x, y: wheel.y, dy: wheel.dy });
+      if (wheel && Math.abs(wheel.dy) >= 0.001) { var o = withKind(wheel.where, 'scroll'); o.dy = wheel.dy; sendInput(o); }
       wheel = null;
     };
     shield.addEventListener('wheel', function (e) {
       if (e.ctrlKey) return;   // a touchpad pinch (zoom), not a scroll
-      var t = tileAt(e.clientX, e.clientY);
-      if (!t) return;
+      var s = spotAt(e.clientX, e.clientY);
+      if (!s) return;
       e.preventDefault();   // over a window, the control page around the preview does not scroll
-      if (wheel && wheel.id !== t.id) flushWheel();
-      if (!wheel) wheel = { id: t.id, x: (e.clientX - t.r.left) / t.r.width, y: (e.clientY - t.r.top) / t.r.height, dy: 0 };
+      if (wheel && wheel.key !== s.key) flushWheel();
+      if (!wheel) wheel = { key: s.key, where: s.where, dy: 0 };
       // Lines (Firefox, 3 per notch) count 33 px, so 1 notch is about 100 px in every browser.
-      var px = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * t.r.height : e.deltaY;
-      wheel.dy += px / t.r.height;
+      var px = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * s.h : e.deltaY;
+      wheel.dy += px / s.h;
       if (!wheelTimer) wheelTimer = setTimeout(flushWheel, 250);
     }, { passive: false });
   }

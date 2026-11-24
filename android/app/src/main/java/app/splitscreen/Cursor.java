@@ -140,6 +140,8 @@ final class Cursor {
     }
 
     private boolean hold(KeyEvent e, char dir) {
+        h.removeCallbacks(glide);   // the remote moves the arrow now, not the PC mouse
+        gliding = false;
         show();
         if (e.getRepeatCount() > 0) return true;   // the ticker already moves it
         boolean wasIdle = !(left || right || up || down);
@@ -207,14 +209,34 @@ final class Cursor {
      * without a move. Nothing is clicked.
      */
     void pointAt(float px, float py) {
+        // Glide there over a few frames instead of jumping: the PC sends about 20 moves a
+        // second, so the arrow moves smoothly between them.
+        // Clamped like place(), so the glide always reaches its target and ends.
+        glideX = Math.max(0, Math.min(root.getWidth() - 1, px));
+        glideY = Math.max(0, Math.min(root.getHeight() - 1, py));
+        show();
+        if (!gliding) { gliding = true; h.post(glide); }
+    }
+
+    private float glideX, glideY;
+    private boolean gliding;
+    private final Runnable glide = new Runnable() {
+        @Override public void run() {
+            x += (glideX - x) * 0.45f;
+            y += (glideY - y) * 0.45f;
+            if (Math.abs(glideX - x) < 1f && Math.abs(glideY - y) < 1f) { x = glideX; y = glideY; gliding = false; }
+            place();
+            if (gliding) h.postDelayed(this, FRAME_MS);
+        }
+    };
+
+    /** A click sent from the preview on the PC. The arrow goes there at once and shows the click. */
+    void tapAt(float px, float py) {
+        h.removeCallbacks(glide);
+        gliding = false;
         x = px; y = py;
         place();
         show();
-    }
-
-    /** A click sent from the preview on the PC. The arrow moves there and shows the click. */
-    void tapAt(float px, float py) {
-        pointAt(px, py);
         click();
     }
 
@@ -227,7 +249,14 @@ final class Cursor {
         cancelGesture();
         View target = windowAt(px, py);
         if (target == null) return;
-        float dist = -dy * target.getHeight();
+        scrollBy(px, py, -dy * target.getHeight());
+    }
+
+    /** A finger drag of dist pixels (+ = down, so the page goes up) from (px, py). */
+    void scrollBy(float px, float py, float dist) {
+        if (dist == 0 || Float.isNaN(dist)) return;
+        cancelGesture();
+        if (windowAt(px, py) == null) return;
         if (Math.abs(dist) < minDragPx) dist = Math.signum(dist) * minDragPx;
         drag(px, py, py + dist);
     }

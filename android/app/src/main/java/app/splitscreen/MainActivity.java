@@ -296,8 +296,12 @@ public class MainActivity extends Activity {
                     continue;
                 }
                 JSONObject last = todo.isEmpty() ? null : todo.get(todo.size() - 1);
+                // Scrolls are joined only on the same window (on the screen: the same spot).
                 if (last != null && "scroll".equals(in.optString("kind")) && "scroll".equals(last.optString("kind"))
-                        && in.optString("id").equals(last.optString("id"))) {
+                        && in.optString("id").equals(last.optString("id"))
+                        && in.optBoolean("screen", false) == last.optBoolean("screen", false)
+                        && (!in.optBoolean("screen", false)
+                            || (in.optDouble("x") == last.optDouble("x") && in.optDouble("y") == last.optDouble("y")))) {
                     try { last.put("dy", last.optDouble("dy", 0) + in.optDouble("dy", 0)); } catch (Exception ignored) { }
                 } else {
                     todo.add(in);
@@ -334,17 +338,32 @@ public class MainActivity extends Activity {
         nextGestureAt = 0;
     }
 
-    /** x and y are the spot in the window (0 to 1). Only a window shown now is touched. */
+    /**
+     * x and y are the spot (0 to 1) in the window "id", or with "screen" in the whole screen
+     * (the preview showed this TV's own picture). Only a window shown now is touched.
+     */
     private void applyInput(JSONObject in) {
         if (!running || !allowControl) return;   // turned off after it was queued
-        Tile t = tiles.get(in.optString("id"));
-        if (t == null || t.root.getVisibility() != View.VISIBLE || t.root.getWidth() <= 1) return;
+        View area;
+        if (in.optBoolean("screen", false)) {
+            area = wall;
+        } else {
+            Tile t = tiles.get(in.optString("id"));
+            if (t == null || t.root.getVisibility() != View.VISIBLE) return;
+            area = t.root;
+        }
+        if (area.getWidth() <= 1) return;
         // The server checks these too; checked again in case the app found the wrong PC.
         double x = in.optDouble("x", Double.NaN), y = in.optDouble("y", Double.NaN), dy = in.optDouble("dy", 0);
         if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(dy)) return;
-        int w = t.root.getWidth(), h = t.root.getHeight();
-        float px = t.root.getLeft() + (float) Math.min(Math.max(x, 0), 1) * (w - 1);
-        float py = t.root.getTop() + (float) Math.min(Math.max(y, 0), 1) * (h - 1);
+        int w = area.getWidth(), h = area.getHeight();
+        float px = area.getLeft() + (float) Math.min(Math.max(x, 0), 1) * (w - 1);
+        float py = area.getTop() + (float) Math.min(Math.max(y, 0), 1) * (h - 1);
+        if (area == wall && "scroll".equals(in.optString("kind")) && dy != 0) {
+            // dy is in screen heights here: the window under the spot scrolls that far.
+            cursor.scrollBy(px, py, (float) (-Math.min(Math.max(dy, -3), 3) * h));
+            return;
+        }
         if ("move".equals(in.optString("kind"))) cursor.pointAt(px, py);
         else if ("tap".equals(in.optString("kind"))) cursor.tapAt(px, py);
         else if ("scroll".equals(in.optString("kind")) && dy != 0) cursor.scrollAt(px, py, (float) Math.min(Math.max(dy, -3), 3));
@@ -477,11 +496,12 @@ public class MainActivity extends Activity {
         for (byte x : b) s.append(String.format("%02x", x));
         return s.toString();
     }
-    private static final long SNAP_EVERY_MS = 250;
-    private static final int SNAP_WIDTH = 480;   // pixels, at most
-    private static final int SNAP_QUALITY = 60;  // JPEG
+    private static final long SNAP_EVERY_MS = 125;   // at most 8 pictures a second
+    private static final int SNAP_WIDTH = 960;   // pixels, at most (the whole screen)
+    private static final int SNAP_QUALITY = 55;  // JPEG
     private volatile boolean snapWanted;         // set on the main thread: from the server ("snap")
-    private int snapNext;
+    private volatile long snapCostMs;            // how long the last picture took, start to sent
+    private long snapStartedAt;
     private final java.util.concurrent.atomic.AtomicBoolean snapBusy = new java.util.concurrent.atomic.AtomicBoolean();
     private android.os.HandlerThread snapThread;   // copies, packs and sends the pictures
     private Handler snapHandler;
@@ -489,58 +509,74 @@ public class MainActivity extends Activity {
     private final Runnable snapper = new Runnable() {
         @Override public void run() {
             if (!running) return;
-            if (snapWanted && allowControl && server != null && !snapBusy.get()) captureNext();
-            // The preview asks for each window once a second: with few windows, wait longer.
-            int n = 0;
-            for (Tile t : tiles.values()) if (t.root.getVisibility() == View.VISIBLE) n++;
-            main.postDelayed(this, Math.max(SNAP_EVERY_MS, 1000 / Math.max(1, n)));
+            // The next picture starts when the last one has been sent, and no sooner than twice
+            // what the last one cost (taking, packing, sending): as fast as the TV and network
+            // allow, at most every SNAP_EVERY_MS. Without PixelCopy the windows are drawn on the
+            // main thread, so then at most 1 a second.
+            if (snapWanted && allowControl && server != null && !snapBusy.get()) captureScreen();
+            boolean copy = android.os.Build.VERSION.SDK_INT >= 26;
+            long delay = copy ? Math.max(SNAP_EVERY_MS, Math.min(2000, 2 * snapCostMs))
+                    : Math.max(1000, 4 * snapCostMs);   // drawn on the main thread: keep it rare
+            if (!snapWanted) delay = 500;              // nobody watches: only check now and then
+            main.postDelayed(this, delay);
         }
     };
 
     /**
-     * Takes the next shown window in turn. On Android 8 and later (Fire OS 7) the screen
-     * itself is copied (PixelCopy): the work runs off the main thread, so the TV picture does
-     * not stutter, and it shows what is really on screen, the arrow and number included.
-     * Older systems draw the window instead (Tile.capture), on the main thread.
+     * Takes 1 picture of all the windows. On Android 8 and later (Fire OS 7) the screen itself
+     * is copied (PixelCopy): the work runs off the main thread, so the TV picture does not
+     * stutter, and it shows what is really on screen, the arrow and numbers included. Older
+     * systems draw the windows instead (Tile.drawInto), on the main thread.
      */
-    private void captureNext() {
-        List<Tile> shown = new ArrayList<>();
-        for (Tile t : tiles.values()) if (t.root.getVisibility() == View.VISIBLE && t.root.getWidth() > 1) shown.add(t);
-        if (shown.isEmpty()) return;
-        Tile t = shown.get(Math.floorMod(snapNext++, shown.size()));
-        final String s = server, id = t.id;
+    private void captureScreen() {
+        int w = wall.getWidth(), h = wall.getHeight();
+        if (w <= 1 || h <= 1) return;
+        final String s = server;
         final int v = version;
-        int w = t.root.getWidth(), h = t.root.getHeight();
         float scale = Math.min(1f, SNAP_WIDTH / (float) w);
+        android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(Math.max(1, Math.round(w * scale)),
+                Math.max(1, Math.round(h * scale)), android.graphics.Bitmap.Config.ARGB_8888);
         snapBusy.set(true);
+        snapStartedAt = android.os.SystemClock.uptimeMillis();
         if (android.os.Build.VERSION.SDK_INT >= 26) {
             int[] at = new int[2];
-            t.root.getLocationInWindow(at);
-            android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(Math.max(1, Math.round(w * scale)),
-                    Math.max(1, Math.round(h * scale)), android.graphics.Bitmap.Config.ARGB_8888);
+            wall.getLocationInWindow(at);
             android.graphics.Rect src = new android.graphics.Rect(at[0], at[1], at[0] + w, at[1] + h);
             try {
                 android.view.PixelCopy.request(getWindow(), src, b, result -> {
-                    if (result == android.view.PixelCopy.SUCCESS) sendSnapshot(b, s, id, v);
+                    if (result == android.view.PixelCopy.SUCCESS) sendSnapshot(b, s, v);
                     else { b.recycle(); snapBusy.set(false); }
                 }, snapHandler);
             } catch (RuntimeException e) { b.recycle(); snapBusy.set(false); }
             return;
         }
-        android.graphics.Bitmap b;
-        try { b = t.capture(SNAP_WIDTH); } catch (RuntimeException e) { b = null; }   // a view that cannot draw now
-        if (b == null) { snapBusy.set(false); return; }
-        final android.graphics.Bitmap pic = b;
-        snapHandler.post(() -> sendSnapshot(pic, s, id, v));
+        try {
+            android.graphics.Canvas c = new android.graphics.Canvas(b);
+            c.drawColor(Color.BLACK);
+            c.scale(scale, scale);
+            List<Tile> shown = new ArrayList<>();
+            for (Tile t : tiles.values()) if (t.root.getVisibility() == View.VISIBLE) shown.add(t);
+            // Back to front, as the screen draws them: by Z, then by place in the wall.
+            shown.sort((a, z) -> a.root.getZ() != z.root.getZ() ? Float.compare(a.root.getZ(), z.root.getZ())
+                    : Integer.compare(wall.indexOfChild(a.root), wall.indexOfChild(z.root)));
+            for (Tile t : shown) {
+                c.save();
+                c.translate(t.root.getLeft(), t.root.getTop());
+                t.drawInto(c, scale);
+                c.restore();
+            }
+        } catch (RuntimeException e) {   // a view that cannot draw now
+            b.recycle(); snapBusy.set(false); return;
+        }
+        snapHandler.post(() -> sendSnapshot(b, s, v));
     }
 
     /** On the picture thread: packs and sends 1 picture. "v" is the window list it shows. */
-    private void sendSnapshot(android.graphics.Bitmap b, String s, String id, int v) {
+    private void sendSnapshot(android.graphics.Bitmap b, String s, int v) {
         try {
             java.io.ByteArrayOutputStream jpeg = new java.io.ByteArrayOutputStream();
             b.compress(android.graphics.Bitmap.CompressFormat.JPEG, SNAP_QUALITY, jpeg);
-            int answer = Server.postJpeg("http://" + s + "/api/snapshot?id=" + android.net.Uri.encode(id)
-                    + "&v=" + v + "&key=" + APP_KEY, jpeg.toByteArray());
+            int answer = Server.postJpeg("http://" + s + "/api/screen?v=" + v + "&key=" + APP_KEY, jpeg.toByteArray());
             // Stop only when the PC says nobody watches. A refused picture (for example while
             // the PC is busy with another one) does not stop the others.
             if (answer == 0) main.post(() -> snapWanted = false);
@@ -548,6 +584,7 @@ public class MainActivity extends Activity {
             main.post(() -> snapWanted = false);   // the PC cannot be reached: stop until asked again
         } finally {
             b.recycle();
+            snapCostMs = android.os.SystemClock.uptimeMillis() - snapStartedAt;
             snapBusy.set(false);
         }
     }
@@ -658,7 +695,7 @@ public class MainActivity extends Activity {
         // Allow PC control: the preview on the PC may click, scroll and move the arrow in the
         // windows, and gets pictures of them. Off until turned on here. It takes effect at once.
         android.widget.CheckBox allow = new android.widget.CheckBox(this);
-        allow.setText("Allow PC control: the PC preview can click and scroll in the windows here and see pictures of them (applies at once)");
+        allow.setText("Allow PC control: the PC preview can click and scroll in the windows here and see pictures of this screen (applies at once)");
         allow.setChecked(allowControl);
         allow.setEnabled(!controlLocked);
         allow.setOnCheckedChangeListener((b, on) -> setAllowControl(on));

@@ -98,10 +98,10 @@ Play up to 16 URLs at once on a TV (built for the Hisense 75QD7QF). You control 
 | Restart a stuck window | Click **↻**. |
 | Close a pop-up in a web page | Click **✖ Pop-up** on that window. The Fire TV app removes the boxes that cover the page. Not in a TV web browser. |
 | Play files from the PC | Put files in the `media` folder. Click **Refresh list**, then **Add**. |
-| See what the TV shows | Click **Show preview**. It shows the windows as set on the PC, not choices made with the TV remote. Video players are muted; web pages may still play sound. It plays only while it is shown and the tab is in front. It uses extra network, because the PC plays every window too. |
+| See what the TV shows | Click **Show preview**. Without the TV's own picture (see below), it shows the windows as set on the PC, not choices made with the TV remote. Video players are muted; web pages may still play sound. It plays only while it is shown and the tab is in front. It uses extra network, because the PC plays every window too. |
 | Allow the PC to control the TV | On the TV, in the Split Screen app, press **MENU (≡)** and tick **Allow PC control** (Fire TV app 1.7 and later). It is off until you turn it on. The rows below need it. |
 | Click or scroll a window on the TV | Click a window in the preview, or turn the mouse wheel over it. The TV clicks or scrolls that window at the same spot. The TV's arrow follows the mouse over the preview, and shows where you clicked; it hides after 10 s without a move. |
-| See the TV's real picture | The preview shows pictures from the TV: about 1 per second per window, and at most 4 a second in all (so 1 per 4 s each with 16 windows). The TV sends them only while the preview is open. Video inside a web page (YouTube, Vimeo) may show black in them. Without them, the preview shows the PC's own copy. |
+| See the TV's real picture | With the Fire TV app 1.8 and later, the preview shows the TV's screen: up to 8 pictures a second, as fast as the TV and network allow. Clicks and scrolls then land where you see them, also when the TV remote made 1 window full screen. The TV sends them only while the preview is open. Video inside a web page (YouTube, Vimeo) may show black in them. Without them, the preview shows the PC's own copy. |
 
 Changes appear on the TV in under 1 second.
 
