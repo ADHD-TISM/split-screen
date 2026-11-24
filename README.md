@@ -70,7 +70,7 @@ Play up to 16 URLs at once on a TV (built for the Hisense 75QD7QF). You control 
 
 **Publish a new version** (after a change, on the PC that builds):
 
-1. Run `npm test` in this folder. It checks the stream relay (it uses ports 18990, 18991 and 18999, which must be free). Fix any failure before you commit.
+1. Run `npm test` in this folder. It checks the stream relay (it uses ports 18990, 18991 and 18999, which must be free). Fix any failure before you commit. GitHub also runs it on every push to `main` and every pull request (`.github\workflows\test.yml`); merge a pull request only when both **Tests** checks (`test (20.12.0)` and `test (24)`) are green. A pull request runs its own copy of the tests, so a green check counts only if it changes nothing in `.github`, `test` or `package.json`: read those changes yourself first.
 2. If the TV app changed, run `android\build-apk.bat`. `SplitScreen.apk` is stored in git, so build it before you commit.
 3. In PowerShell in this folder (`split-screen`), set the version to the release number (`1.1.0` for v1.1): `npm version 1.1.0 --no-git-tag-version --allow-same-version`. This updates `package.json` and `package-lock.json`. `SplitScreen.exe` shows it in Properties > Details. Commit the change, merge it into `main`, and push `main`. The release is tagged on `main` on GitHub.
 4. Switch to `main` and update it (`git switch main`, then `git pull --ff-only`), then build `SplitScreen.exe` with `build-exe.bat`. The exe then holds exactly the tagged code. The build also writes `NODE-LICENSE.txt`, the license of the Node.js inside the exe (it needs an internet connection for this).

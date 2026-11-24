@@ -2,7 +2,7 @@
 // types, playlists and compression. Run: npm test   (or: node test/relay-server.mjs)
 // It starts Split Screen on TEST_PORT (default 18990, with discovery on 18999) and a fake stream
 // server on this PC's network address, port TEST_PORT + 1. State and media go in a temp folder.
-// Needs a network address (not 127.x): without one the test is skipped.
+// Needs a network address (not 127.x): without one the test is skipped (on GitHub it fails).
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -17,7 +17,11 @@ const UP_PORT = PORT + 1;
 // A normal network address (not 127.x, preferably not a 169.254.x link-local one).
 const v4 = Object.values(os.networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4' && !i.internal);
 const LAN = (v4.find((i) => !i.address.startsWith('169.254.')) || v4[0])?.address;
-if (!LAN) { console.log('Relay server test skipped: this PC has no network address.'); process.exit(0); }
+// On GitHub (CI is set there) a skip would show a pass that tested nothing, so it fails instead.
+if (!LAN) {
+  console.log(`Relay server test ${process.env.CI ? 'failed' : 'skipped'}: this PC has no network address.`);
+  process.exit(process.env.CI ? 1 : 0);
+}
 
 // Split Screen moves to the next port when its port is busy, so a busy test port would make this
 // test talk to some other program. Stop at once instead.

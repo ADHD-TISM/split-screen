@@ -1,0 +1,43 @@
+# Runs npm test (the stream relay checks) on every push to main and every pull request.
+# A red mark on a pull request means its change breaks a test: do not merge it.
+# A pull request runs its own copy of this file and the tests, so it can turn the mark green by
+# changing them. Read any change to .github, test or package.json yourself before you merge.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read the code only. A pull request's code runs here with no secrets and no write access.
+permissions:
+  contents: read
+
+# A newer push to the same pull request stops its older run. Runs on main always finish, so
+# every commit there gets its own result.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # Split Screen runs on Windows, so the tests do too.
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Node.js the README supports, and the Node.js line the release exe is built with.
+        node: ['20.12.0', '24']
+    steps:
+      # The 2 actions are pinned to a commit, so a changed tag cannot change their code. (Node.js
+      # and the Windows image still come in their latest versions.)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false   # nothing is installed, so nothing to cache
+      # The tests use only Node.js itself, so no npm install is needed.
+      - run: npm test
