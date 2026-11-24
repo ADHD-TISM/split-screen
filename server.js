@@ -452,6 +452,14 @@ function learnHost(host) {
   if (learnedHosts.size >= MAX_LEARNED_HOSTS) learnedHosts.delete(learnedHosts.values().next().value);
   learnedHosts.add(host);
 }
+
+// After an answer: the link asked for is refreshed only if it was learned (a listed one is allowed
+// by the window list). The host that answered is learned, even when it is listed; a learned host
+// can reach only public addresses (see privateAllowed).
+function learnAnswered(asked, answered) {
+  if (learnedHosts.has(asked.host)) learnHost(asked.host);
+  learnHost(answered.host);
+}
 // ---- relay rules: end ----
 
 // The next piece of a response body, or null at the end. After a piece the stream is paused again,
@@ -621,11 +629,7 @@ async function relay(req, res, target) {
     return;
   }
   clearTimeout(headerTimer);
-  // The link asked for is refreshed only if it was learned (a listed one is allowed by the window
-  // list). The host that answered is learned below, even when it is listed; a learned host can
-  // reach only public addresses (see privateAllowed).
-  if (learnedHosts.has(u.host)) learnHost(u.host);
-  learnHost(finalUrl.host);
+  learnAnswered(u, finalUrl);
   const type = up.headers['content-type'] || '';
   // A playlist by its type, or by .m3u or .m3u8 anywhere in the link (path or query, of the link
   // asked for or the one it redirected to), as the README and the TV page say.

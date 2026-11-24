@@ -79,6 +79,11 @@ const routes = {
   // cannot block the server for long. (Under a short base the cap is not reached; this does not test that.)
   '/slow-redir.m3u8': (res) => send(res, 302, { location: `${LONG_DIR}/slow.m3u8` }),
   [`${LONG_DIR}/slow.m3u8`]: (res) => send(res, 200, { 'content-type': 'application/vnd.apple.mpegurl' }, '#EXTM3U\n' + '//[\n'.repeat(1000000)),   // under the 4 MB read limit, so the work cap is what stops it
+  // Hosts a playlist names are learned only if its whole rewrite works. .invalid names never resolve.
+  '/learns.m3u8': (res) => send(res, 200, { 'content-type': 'application/vnd.apple.mpegurl' }, '#EXTM3U\nhttp://learned.invalid/seg.ts\n'),
+  // 1 link of 3 million "/": under the 4 MB read limit, but over the rewrite cap (each "/" grows to %2F).
+  // It must stay under MAX_PLAYLIST_BYTES: both limits answer "too large", and only the rewrite tests this.
+  '/toolarge.m3u8': (res) => send(res, 200, { 'content-type': 'application/vnd.apple.mpegurl' }, '#EXTM3U\nhttp://never.invalid/' + '/'.repeat(3000000)),
   '/xfoo.m3u8': (res) => send(res, 200, { 'content-type': 'application/vnd.apple.mpegurl', 'content-encoding': 'x-foo' }, Buffer.from([1, 2, 3, 4, 5, 6, 7, 8])),
 };
 function send(res, code, headers, body) { res.writeHead(code, headers); res.end(body); }
@@ -144,6 +149,15 @@ async function runChecks() {
   r = await R(`${UP}/redir-loop`); check('redirect loop stopped', r.status === 502, r.status);
   r = await R(`${UP}/redir-file`); check('redirect to file: refused', r.status === 502, r.status);
   r = await R('http://other.example/x'); check('unlisted host refused', r.status === 403, r.status);
+
+  // A host named by a playlist that was rewritten is learned (it is fetched, so not 403). A host
+  // named only by a playlist refused as too large is not learned (403).
+  r = await R(`${UP}/learns.m3u8`); await r.text(); check('playlist rewritten', r.status === 200, r.status);
+  // The checks look for "window list" (not learned), not the status: a DNS that answers made-up
+  // names with a LAN address makes a learned host 403 too, by the local-network rule.
+  r = await R('http://learned.invalid/seg.ts'); b = await r.text(); check('host of a rewritten playlist learned', !b.includes('window list'), `${r.status} ${b.slice(0, 60)}`);
+  r = await R(`${UP}/toolarge.m3u8`); b = await r.text(); check('playlist over the rewrite cap refused', r.status === 502 && b.includes('too large'), `${r.status} ${b.slice(0, 60)}`);
+  r = await R('http://never.invalid/x'); b = await r.text(); check('host of a refused playlist not learned', r.status === 403 && b.includes('window list'), `${r.status} ${b.slice(0, 60)}`);
 
   // Rule 5: nothing relayed can run.
   for (const p of ['/page', '/svg', '/mixed']) { r = await R(UP + p); check(`${p} as bytes`, r.headers.get('content-type') === 'application/octet-stream' && r.headers.get('x-content-type-options') === 'nosniff', r.headers.get('content-type')); }

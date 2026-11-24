@@ -42,7 +42,7 @@ const dns = { lookup: (name, options, cb) => {
 const rules = new Function('os', 'net', 'dns', 'state', 'learnedHosts', `'use strict';
   ${block}
   return { isPrivateIp, isLoopbackIp, localStyleHost, privateAllowed, relayAllowed, listedHost, relayType,
-    relayLookup, literalRefused, learnHost };`)(os, net, dns, state, learnedHosts);
+    relayLookup, literalRefused, learnHost, learnAnswered };`)(os, net, dns, state, learnedHosts);
 
 let fails = 0;
 const check = (name, got, want) => {
@@ -148,6 +148,18 @@ check('host learned again stays', learnedHosts.has('h0'), true);
 check('newest host is kept', learnedHosts.has('new'), true);
 rules.learnHost('h2');   // already learned: nothing is dropped
 check('learning a known host drops none', learnedHosts.size === 500 && learnedHosts.has('h3'), true);
+
+// After an answer: a learned link that redirected stays (without the refresh, 'first.example'
+// would be the oldest and dropped). A link not learned before (here a listed one) stays unlearned.
+learnedHosts.clear();
+rules.learnHost('first.example');
+for (let i = 0; i < 499; i++) rules.learnHost('g' + i);
+rules.learnAnswered(new URL('http://first.example/a.m3u8'), new URL('http://cdn2.example/a.m3u8'));
+check('learned link that redirected stays', learnedHosts.has('first.example'), true);
+check('host that answered is learned', learnedHosts.has('cdn2.example'), true);
+check('learned hosts still at 500', learnedHosts.size, 500);
+rules.learnAnswered(new URL('http://example.com/x'), new URL('http://cdn3.example/x'));
+check('listed link is not learned', learnedHosts.has('example.com'), false);
 
 if (fails) { console.log(`${fails} check(s) failed.`); process.exit(1); }
 console.log('Relay rules: all checks passed.');
