@@ -136,6 +136,16 @@ function kindOf(url) {
   } catch { return 'Invalid URL'; }
 }
 
+// The same test the Fire TV app uses (WebTile.java, Tile.java) to show a URL as a web page:
+// not a file or stream, not a YouTube or Vimeo video, not an image. Only those get Close pop-up.
+function isWebPageTile(url) {
+  if (url.startsWith('/')) return false;
+  if (/\.m3u8/i.test(url) || /\.(mp4|webm|ogv|mov|m4v|mkv|ts|mp3|m4a|aac|ogg|wav|flac)(\?|#|$)/i.test(url)) return false;
+  if (/(?:youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/|v\/)|youtu\.be\/)[A-Za-z0-9_-]{6,}/.test(url)) return false;
+  if (/vimeo\.com\/(?:video\/)?\d{5,}/.test(url)) return false;
+  return !/\.(jpe?g|png|gif|webp|avif|svg)(\?|#|$)/i.test(url);
+}
+
 function normalize(line) {
   let s = line.trim();
   if (!s) return null;
@@ -205,6 +215,10 @@ function render() {
     btn('🔊 Sound', 'Play sound from this window', () => update((n) => { n.audio = n.audio === w.id ? null : w.id; }), state.audio === w.id);
     btn('⛶ Full', 'Show only this window', () => update((n) => { n.solo = n.solo === w.id ? null : w.id; }), state.solo === w.id);
     btn('↻', 'Reload this window', () => update((n) => { n.windows[i].nonce++; }));
+    // Web pages only. The Fire TV app removes what covers the page; a TV web browser cannot.
+    if (isWebPageTile(w.url)) {
+      btn('✖ Pop-up', 'Close pop-ups in this window (Fire TV app)', () => update((n) => { n.windows[i].popup = (n.windows[i].popup || 0) + 1; }));
+    }
     btn('▲', 'Move up', () => update((n) => { [n.windows[i - 1], n.windows[i]] = [n.windows[i], n.windows[i - 1]]; }), false, i === 0);
     btn('▼', 'Move down', () => update((n) => { [n.windows[i + 1], n.windows[i]] = [n.windows[i], n.windows[i + 1]]; }), false, i === state.windows.length - 1);
     btn('✕', 'Remove', () => update((n) => {

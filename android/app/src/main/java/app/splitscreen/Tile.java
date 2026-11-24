@@ -75,6 +75,12 @@ abstract class Tile {
     /** Free the player or web view. */
     abstract void release();
 
+    /** The Close pop-up button on the PC. Only web page windows do anything. */
+    void closePopup() {}
+
+    /** The last Close pop-up count seen for this window. -1: none seen yet. */
+    int popupSeen = -1;
+
     /** Picks a tile type for a URL. */
     static Tile create(Context ctx, String id, String key, String url, String serverBase) {
         String full = url.startsWith("/") ? serverBase + url : url;

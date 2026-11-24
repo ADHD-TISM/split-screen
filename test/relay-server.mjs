@@ -220,4 +220,12 @@ async function runChecks() {
   for (let i = 0; i < 10; i++) await (await R(`${UP}/doc?x=.m3u8`)).arrayBuffer();
   r = await R(`${UP}/live.m3u8`); check('slots given back', r.status === 200, r.status);
   r = await fetch(`http://127.0.0.1:${PORT}/api/info`, { signal: AbortSignal.timeout(20000) }); check('server still answers', r.status === 200, r.status);
+
+  // Last, because it replaces the window list: the Close pop-up count is kept only as a whole
+  // number from 1 to 999999999.
+  const pops = [3, 999999999, 0, -1, 1.5, 'x', 1e9];
+  r = await fetch(`http://127.0.0.1:${PORT}/api/state`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(20000),
+    body: JSON.stringify({ layout: 'auto', windows: pops.map((popup, i) => ({ id: 'p' + i, url: `${UP}/page`, nonce: 0, popup })) }) });
+  const kept = r.status === 200 ? (await r.json()).windows.map((w) => w.popup) : [];
+  check('Close pop-up count checked', JSON.stringify(kept) === JSON.stringify([3, 999999999, null, null, null, null, null]), `${r.status} ${JSON.stringify(kept)}`);
 }

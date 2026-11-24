@@ -11,8 +11,8 @@ android {
         // Fire OS 7 is Android 9 (API 28). API 25 also covers older Fire TV sticks.
         minSdk 25
         targetSdk 34
-        versionCode 5
-        versionName '1.4'
+        versionCode 6
+        versionName '1.5'
     }
 
     buildTypes {
@@ -34,6 +34,7 @@ dependencies {
     implementation "androidx.media3:media3-exoplayer:$media3"
     implementation "androidx.media3:media3-exoplayer-hls:$media3"
     implementation "androidx.media3:media3-ui:$media3"
-    // Document-start scripts: limit YouTube's video format inside each window.
+    // Document-start scripts: limit YouTube's video format inside each window, and hide
+    // cookie boxes in web page windows.
     implementation 'androidx.webkit:webkit:1.11.0'
 }

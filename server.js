@@ -106,6 +106,8 @@ function sanitize(input) {
     }
     const nonce = Number.isInteger(w?.nonce) && w.nonce >= 0 ? w.nonce : 0;
     const out = { id, url, nonce };
+    // Close pop-up count: the TV app clears the window's pop-ups each time it goes up.
+    if (Number.isInteger(w?.popup) && w.popup > 0 && w.popup < 1e9) out.popup = w.popup;
     // Free layout: position and size as fractions of the screen (0 to 1).
     const r = w?.rect;
     if (r && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(r[k]))) {

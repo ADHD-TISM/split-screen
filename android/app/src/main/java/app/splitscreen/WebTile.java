@@ -4,6 +4,8 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.util.Log;
 import android.webkit.WebChromeClient;
@@ -63,8 +65,66 @@ final class WebTile extends Tile {
             + "return d(c);};}"
             + "})();";
 
+    // Cookie and consent boxes of the common providers. Hidden in web page windows, in every
+    // frame, so the page shows without them. Nothing is accepted or refused: the box only goes.
+    private static final String CONSENT = "#onetrust-consent-sdk,#onetrust-banner-sdk,.onetrust-pc-dark-filter,"
+            + "#CybotCookiebotDialog,#CybotCookiebotDialogBodyUnderlay,#usercentrics-root,#usercentrics-cmp-ui,"
+            + "#didomi-host,.didomi-popup-backdrop,#qc-cmp2-container,.qc-cmp2-container,"
+            + "#truste-consent-track,.truste_overlay,.truste_box_overlay,[id^=sp_message_container_],"
+            + ".fc-consent-root,#cmpbox,#cmpbox2,.cmpboxBG,#iubenda-cs-banner,#cookie-law-info-bar,"
+            + ".cky-consent-container,.cky-overlay,.cc-window,.cc-banner,#cookiescript_injected,"
+            + "#moove_gdpr_cookie_info_bar,.osano-cm-window,#consent_blackbar,#_evidon_banner,.evidon-banner,"
+            + "#gdpr-consent-tool-wrapper,#cmp-app-container,#BorlabsCookieBox,#cookie-notice,#cookieChoiceInfo";
+
+    // Turns up-and-down scrolling back on, only where a page turned it off. The window scrolls
+    // (html); the body gets "visible" (the browser makes that "auto" when the site hides
+    // side-to-side scrolling). Side-to-side stays as the site set it, so menus kept off-screen
+    // do not widen the page.
+    private static final String UNLOCK =
+            "[[document.documentElement,'auto'],[document.body,'visible']].forEach(function(p){"
+            + "if(p[0]&&getComputedStyle(p[0]).overflowY==='hidden')p[0].style.setProperty('overflow-y',p[1],'important');});";
+
+    // Runs in every frame of a web page window before the page's own code. It hides CONSENT.
+    // While such a box is on the page (checked for 30 s), scrolling stays on: these boxes
+    // often turn it off until you answer.
+    private static final String CLEAN_JS =
+            "(function(){if(window.__ssClean)return;window.__ssClean=1;"
+            + "var SEL=" + JSONQuote(CONSENT) + ";"
+            + "var st=document.createElement('style');"
+            + "st.textContent=SEL+'{display:none!important;visibility:hidden!important}';"
+            + "(document.head||document.documentElement).appendChild(st);"
+            + "var n=0,t=setInterval(function(){if(++n>30)clearInterval(t);"
+            + "if(!document.body||!document.querySelector(SEL))return;"
+            + UNLOCK + "},1000);"
+            + "})();";
+
+    // Players and anything that plays or draws. Close pop-up never removes a box that is or
+    // holds one: a floating video in a frame, a radio bar, a map.
+    private static final String KEEP = "video,audio,canvas,embed,object,iframe[allowfullscreen],"
+            + "iframe[allow*=fullscreen],iframe[allow*=autoplay],[class*=player],[id*=player]";
+
+    // The Close pop-up button on the PC control page. Removes what covers the page: fixed boxes
+    // of some size that hold no player (KEEP), and their dark backgrounds. It keeps a bar along
+    // the top edge (often the site's own menu) and a box that holds most of the page (a page
+    // built inside 1 full-screen box). Scrolling is turned back on.
+    private static final String CLOSE_POPUP_JS =
+            "(function(){var vw=innerWidth,vh=innerHeight,gone=0,KEEP=" + JSONQuote(KEEP) + ";"
+            + "var all=document.querySelectorAll('body *'),half=all.length/2;"
+            + "for(var i=0;i<all.length;i++){var e=all[i];if(!e.isConnected)continue;"
+            + "var cs=getComputedStyle(e);if(cs.position!=='fixed'||cs.display==='none')continue;"
+            + "if(e.matches(KEEP)||e.querySelector(KEEP)||e.shadowRoot)continue;"
+            + "if(e.getElementsByTagName('*').length>half)continue;"
+            + "var r=e.getBoundingClientRect();"
+            + "var w=Math.max(0,Math.min(r.right,vw)-Math.max(r.left,0)),h=Math.max(0,Math.min(r.bottom,vh)-Math.max(r.top,0));"
+            + "if(w*h<vw*vh*0.03)continue;"
+            + "if(r.top<=0&&(r.height<vh*0.15||r.height<=80))continue;"
+            + "e.remove();gone++;}"
+            + "if(gone){" + UNLOCK + "}"
+            + "return gone;})()";
+
     private final WebView web;
     private final boolean player;   // true for YouTube / Vimeo: sound can be controlled
+    private final boolean page;     // true for a web page (not a player or an image)
     private final boolean youtube;
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -80,7 +140,44 @@ final class WebTile extends Tile {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setLoadWithOverviewMode(true);
         s.setUseWideViewPort(true);
-        web.setWebChromeClient(new WebChromeClient());
+        // A page may not open new windows or tabs. With multiple windows on, window.open asks
+        // onCreateWindow (which says no) instead of loading over the page in this window.
+        s.setSupportMultipleWindows(true);
+        s.setJavaScriptCanOpenWindowsAutomatically(false);
+        web.setWebChromeClient(new WebChromeClient() {
+            // A link the viewer clicked that would open a new tab (target=_blank) opens in this
+            // window instead. Only a real link: for a link around an image the address comes
+            // from requestFocusNodeHref (the hit test would give the image's own address).
+            // Anything else that tries to open a window (a button, a script, an ad) is refused.
+            @Override public boolean onCreateWindow(WebView v, boolean dialog, boolean user, android.os.Message m) {
+                if (!user || !page) return false;
+                WebView.HitTestResult hit = v.getHitTestResult();
+                int type = hit == null ? WebView.HitTestResult.UNKNOWN_TYPE : hit.getType();
+                if (type == WebView.HitTestResult.SRC_ANCHOR_TYPE) {
+                    openHere(hit.getExtra());
+                } else if (type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
+                    v.requestFocusNodeHref(new Handler(Looper.getMainLooper(), msg -> {
+                        openHere(msg.getData().getString("url"));
+                        return true;
+                    }).obtainMessage());
+                }
+                return false;
+            }
+            // Alert, confirm and prompt boxes would cover the whole TV and wait for a press.
+            // They are answered at once: OK for an alert, Cancel for the others.
+            @Override public boolean onJsAlert(WebView v, String u, String msg, android.webkit.JsResult r) {
+                r.confirm(); return true;
+            }
+            @Override public boolean onJsConfirm(WebView v, String u, String msg, android.webkit.JsResult r) {
+                r.cancel(); return true;
+            }
+            @Override public boolean onJsPrompt(WebView v, String u, String msg, String def, android.webkit.JsPromptResult r) {
+                r.cancel(); return true;
+            }
+            @Override public boolean onJsBeforeUnload(WebView v, String u, String msg, android.webkit.JsResult r) {
+                r.confirm(); return true;
+            }
+        });
         web.setWebViewClient(new WebViewClient() {
             @Override public void onPageFinished(WebView v, String u) {
                 status = "page loaded";
@@ -93,8 +190,7 @@ final class WebTile extends Tile {
             // they may load data:, blob: or about: pages as part of the site.
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 if (!r.isForMainFrame()) return false;
-                String scheme = r.getUrl().getScheme();
-                if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return true;
+                if (!isWebUrl(r.getUrl().toString())) return true;
                 return player;
             }
             @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
@@ -104,6 +200,7 @@ final class WebTile extends Tile {
         setContent(web);
 
         Matcher yt = YT.matcher(url), vm = VIMEO.matcher(url);
+        boolean isPage = false;
         if (yt.find()) {
             youtube = true; player = true;
             boolean limited = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT);
@@ -125,9 +222,30 @@ final class WebTile extends Tile {
                     + "<img src='" + TextUtils.htmlEncode(url) + "' style='margin:auto;max-width:100%;max-height:100%'"
                     + " onload=\"document.title='ok'\"></body></html>", "text/html", "utf-8", null);
         } else {
-            youtube = false; player = false;
+            youtube = false; player = false; isPage = true;
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                WebViewCompat.addDocumentStartJavaScript(web, CLEAN_JS, Collections.singleton("*"));
+            } else {
+                Log.w("SplitScreen", "WebView too old: cookie boxes are not hidden");
+            }
             web.loadUrl(url);
         }
+        page = isPage;
+    }
+
+    /** Only http and https pages load in a window: not intent:, market:, file: or javascript:. */
+    private static boolean isWebUrl(String u) {
+        return u != null && u.matches("(?i)https?://.*");
+    }
+
+    /** Opens a clicked new-tab link in this window (web pages only). */
+    private void openHere(String link) {
+        if (page && isWebUrl(link)) web.loadUrl(link);
+    }
+
+    @Override void closePopup() {
+        if (!page) return;
+        web.evaluateJavascript(CLOSE_POPUP_JS, null);
     }
 
     private void frame(String src) {

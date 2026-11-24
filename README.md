@@ -96,6 +96,7 @@ Play up to 16 URLs at once on a TV (built for the Hisense 75QD7QF). You control 
 | Show 1 window big | Click **⛶ Full**. Click again to return to the wall. |
 | Change the layout | Click a layout button. **Auto** fits the window count. |
 | Restart a stuck window | Click **↻**. |
+| Close a pop-up in a web page | Click **✖ Pop-up** on that window. The Fire TV app removes the boxes that cover the page. Not in a TV web browser. |
 | Play files from the PC | Put files in the `media` folder. Click **Refresh list**, then **Add**. |
 | See what the TV shows | Click **Show preview**. It shows the windows as set on the PC, not choices made with the TV remote. Video players are muted; web pages may still play sound. It plays only while it is shown and the tab is in front. It uses extra network, because the PC plays every window too. |
 
@@ -200,6 +201,13 @@ If the app does not find the PC, press **MENU (≡)** and type the address from 
 - The app finds the PC by itself (UDP port 47390). It finds the PC again when the port changes.
 - If Windows Firewall asks about Split Screen or Node.js, allow **Private networks** only. The search needs it.
 - To rebuild the app, run `android\build-apk.bat`. It writes a new `SplitScreen.apk`. Commit the new APK so the copy in git stays current.
+
+**Pop-ups in web pages** (version 1.5 and later):
+
+- Cookie and consent boxes of the common providers are hidden. Nothing is accepted or refused: the box only goes away. Some sites keep the page locked until you answer; those stay locked.
+- A page cannot open new windows or tabs. A link you click that would open a new tab opens in the same window. A button that would open a new tab does nothing.
+- Alert and question boxes from a page are closed at once (OK for an alert, Cancel for a question).
+- For any other box, click **✖ Pop-up** on that window on the PC control page. It removes fixed boxes that cover the page. It keeps players (video, audio, a video in a frame), a bar along the top edge (often the site's menu), and a box that holds most of the page. A pop-up that plays a video is kept too. Click it again for a box that comes back. If it removed too much, click **↻** to reload the window.
 
 ## Live streams
 

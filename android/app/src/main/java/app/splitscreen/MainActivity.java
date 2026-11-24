@@ -282,6 +282,12 @@ public class MainActivity extends Activity {
                 tiles.put(id, t);
                 wall.addView(t.root, new FrameLayout.LayoutParams(1, 1));
             }
+            // Close pop-up on the PC adds 1 to "popup". A new window only notes the count.
+            int popup = w.optInt("popup", 0);
+            if (t.popupSeen != popup) {
+                if (t.popupSeen >= 0) t.closePopup();
+                t.popupSeen = popup;
+            }
             int idx = shown.indexOf(w);
             float x, y, fw, fh;
             boolean visible, small = false;
