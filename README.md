@@ -251,6 +251,7 @@ Split Screen has no passwords. It trusts the network it runs on.
 - The TV app finds the PC by a network search and trusts the 1st PC that answers. If the TV shows the wrong PC, type the PC's address in the app's MENU dialog.
 - Get `SplitScreen.apk` and `SplitScreen.exe` only from this repository's Releases page. Official releases are built by the maintainer. To check an APK, run `apksigner verify --print-certs SplitScreen.apk` (Android SDK build-tools). The SHA-256 certificate digest must be `f03a3caa2cc1a11d82652b2cc812400fd963883d458ab31945b7dfc43fad5bee`.
 - Pull requests that change `SplitScreen.apk` or `android\gradle\wrapper\gradle-wrapper.jar` are not merged: binary files cannot be reviewed. The maintainer builds them.
+- To report a security problem, use **Report a vulnerability** on this repository's **Security** tab. Do not open a public issue for it.
 
 ## Settings
 
