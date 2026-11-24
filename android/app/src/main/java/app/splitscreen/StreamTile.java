@@ -1,10 +1,15 @@
 package app.splitscreen;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.RectF;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.LayoutInflater;
+import android.view.TextureView;
+import android.view.View;
 
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
@@ -29,6 +34,7 @@ final class StreamTile extends Tile {
     private final boolean local;
     private final String serverBase;
     private final ExoPlayer player;
+    private final PlayerView view;
 
     private boolean viaPc, locked, everPlayed, released, visible = true, audible;
     private int fails;
@@ -51,7 +57,7 @@ final class StreamTile extends Tile {
         player.setRepeatMode(hls ? Player.REPEAT_MODE_OFF : Player.REPEAT_MODE_ONE);
         player.setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT);
 
-        PlayerView view = (PlayerView) LayoutInflater.from(ctx).inflate(R.layout.tile_player, root, false);
+        view = (PlayerView) LayoutInflater.from(ctx).inflate(R.layout.tile_player, root, false);
         view.setPlayer(player);
         setContent(view);
 
@@ -149,6 +155,23 @@ final class StreamTile extends Tile {
             main.postDelayed(this, 5000);
         }
     };
+
+    /**
+     * The video is in a TextureView (tile_player.xml), which a normal draw leaves empty. Its
+     * current frame is copied, already scaled down, to where the view sits in the window.
+     */
+    @Override void drawVideo(Canvas c, float scale) {
+        View v = view.getVideoSurfaceView();
+        if (!(v instanceof TextureView) || v.getWidth() <= 1 || v.getHeight() <= 1) return;
+        TextureView tv = (TextureView) v;
+        if (!tv.isAvailable()) return;
+        Bitmap frame = tv.getBitmap(Math.max(1, Math.round(v.getWidth() * scale)), Math.max(1, Math.round(v.getHeight() * scale)));
+        if (frame == null) return;
+        float x = 0, y = 0;
+        for (View p = v; p != null && p != root; p = (View) p.getParent()) { x += p.getLeft(); y += p.getTop(); }
+        c.drawBitmap(frame, null, new RectF(x, y, x + v.getWidth(), y + v.getHeight()), null);
+        frame.recycle();
+    }
 
     @Override void setAudible(boolean on) {
         audible = on;

@@ -101,7 +101,7 @@ let fails = 0;
 try {
   writeState(tmp);
   fs.mkdirSync(path.join(tmp, 'media'));
-  const env = { ...process.env, PORT: String(PORT), DISCOVERY_PORT: String(PORT + 9), OPEN_BROWSER: '0', TRAY: '0', INPUT_TTL_MS: '3000',
+  const env = { ...process.env, PORT: String(PORT), DISCOVERY_PORT: String(PORT + 9), OPEN_BROWSER: '0', TRAY: '0', INPUT_TTL_MS: '3000', SNAPSHOT_UPLOAD_TIMEOUT_MS: '500',
     STATE_FILE: path.join(tmp, 'state.json'), MEDIA_DIR: path.join(tmp, 'media') };
   srv = spawn(process.execPath, [server], { cwd: tmp, env, stdio: ['ignore', 'pipe', 'pipe'] });
   srv.stdout.on('data', (d) => { log += d; });
@@ -262,8 +262,75 @@ async function runChecks() {
   r = await input({ id: 'p0', kind: 'tap', x: 0.5, y: 0.5 });
   const waiting = await getState('?tv=1&in=0');
   check('a new input is sent', r.status === 200 && (waiting.inputs || []).length === 1, `${r.status} ${JSON.stringify(waiting.inputs)}`);
+  // Window pictures: only from the TV app (its address and key, from a tv=1&in&key poll), only
+  // JPEG, shown to this PC, and kept while the window is the same. Not from another site.
+  const KEY = '0123456789abcdef0123456789abcdef';
+  await getState(`?tv=1&in=0&key=${KEY}`);
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);
+  const ver = plain.version;
+  const snapPost = (id, body, key = KEY, headers = {}, v = ver) => fetch(`http://127.0.0.1:${PORT}/api/snapshot?id=${id}&v=${v}&key=${key}`,
+    { method: 'POST', headers: { 'Content-Type': 'image/jpeg', ...headers }, body, signal: AbortSignal.timeout(20000) });
+  const snapCodes = [(await snapPost('p0', jpeg)).status, (await snapPost('p1', Buffer.from('<svg/>'))).status,
+    (await snapPost('p1', jpeg, 'f'.repeat(32))).status, (await snapPost('p1', jpeg, KEY, { Origin: 'https://evil.example' })).status,
+    await snapPost('p1', Buffer.alloc(400 * 1024, 0xff)).then((x) => x.status, () => 0)];   // too big: refused or cut off
+  check('pictures checked', snapCodes[0] === 200 && snapCodes[1] === 400 && snapCodes[2] === 403 && snapCodes[3] === 403 && snapCodes[4] !== 200, JSON.stringify(snapCodes));
+  // An upload cut off half-way (the TV lost Wi-Fi) does not block the next one.
+  await new Promise((ok) => {
+    const sock = net.connect(PORT, '127.0.0.1', () => {
+      sock.write(`POST /api/snapshot?id=p0&v=${ver}&key=${KEY} HTTP/1.1\r\nHost: 127.0.0.1:${PORT}\r\nContent-Type: image/jpeg\r\nContent-Length: 1000\r\n\r\n\xff\xd8\xff`);
+      setTimeout(() => { sock.destroy(); setTimeout(ok, 200); }, 200);
+    });
+    sock.on('error', () => ok());
+  });
+  check('a cut-off upload does not block the next', (await snapPost('p0', jpeg)).status === 200, '');
+  // A stalled upload (the body stops coming, the connection stays open) is ended after
+  // SNAPSHOT_UPLOAD_TIMEOUT_MS (500 ms here); then the next one works.
+  const stalled = net.connect(PORT, '127.0.0.1', () => {
+    stalled.write(`POST /api/snapshot?id=p0&v=${ver}&key=${KEY} HTTP/1.1\r\nHost: 127.0.0.1:${PORT}\r\nContent-Type: image/jpeg\r\nContent-Length: 1000\r\n\r\nab`);
+  });
+  stalled.on('error', () => {});
+  await new Promise((ok) => setTimeout(ok, 300));
+  check('a second upload waits its turn', (await snapPost('p0', jpeg)).status === 429, '');
+  await new Promise((ok) => setTimeout(ok, 700));
+  check('a stalled upload does not block the next', (await snapPost('p0', jpeg)).status === 200, '');
+  stalled.destroy();
+  // A picture of a window that is gone, or taken for an older list, is dropped without an error.
+  const dropped = [await snapPost('nope', jpeg), await snapPost('p2', jpeg, KEY, {}, ver - 1)];
+  r = await fetch(`http://127.0.0.1:${PORT}/api/snapshot?id=p2`, { signal: AbortSignal.timeout(20000) });
+  check('old or unknown pictures dropped', dropped.every((x) => x.status === 200) && r.status === 404, `${dropped.map((x) => x.status)} ${r.status}`);
+  // Another device does not take over while the TV app polls; the same device may change its key.
+  const other = await fetch(`http://${LAN}:${PORT}/api/state?tv=1&in=0&key=${'e'.repeat(32)}`, { signal: AbortSignal.timeout(20000) });
+  check('a poll from another address works', other.status === 200, other.status);
+  check('the TV app keeps its place', (await snapPost('p0', jpeg)).status === 200, '');
+  const KEY2 = 'abcdef0123456789abcdef0123456789';
+  await getState(`?tv=1&in=0&key=${KEY2}`);
+  check('the TV app may change its key', (await snapPost('p0', jpeg, KEY2)).status === 200 && (await snapPost('p0', jpeg)).status === 403, '');
+  r = await fetch(`http://127.0.0.1:${PORT}/api/snapshot?id=p0`, { headers: { 'Sec-Fetch-Site': 'cross-site' }, signal: AbortSignal.timeout(20000) });
+  check('pictures not shown to another site', r.status === 403, r.status);
+  r = await fetch(`http://127.0.0.1:${PORT}/api/snapshot?id=p0`, { signal: AbortSignal.timeout(20000) });
+  const got = Buffer.from(await r.arrayBuffer());
+  check('picture shown to this PC', r.status === 200 && r.headers.get('content-type') === 'image/jpeg' && got.equals(jpeg), `${r.status} ${r.headers.get('content-type')}`);
+  check('the TV app is asked for pictures', (await getState(`?tv=1&in=0&key=${KEY2}`)).snap === true, '');
+  check('other pollers are not asked', (await getState('?tv=1&in=0')).snap === false, '');
+  r = await fetch(`http://127.0.0.1:${PORT}/api/snapshot?id=p1`, { signal: AbortSignal.timeout(20000) });
+  check('no picture yet gives 404', r.status === 404, r.status);
   r = await fetch(`http://127.0.0.1:${PORT}/api/state`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(20000),
     body: JSON.stringify({ layout: '1x1', windows: plain.windows }) });
   const after = await getState('?tv=1&in=0');
   check('a window list change drops inputs', r.status === 200 && Array.isArray(after.inputs) && after.inputs.length === 0, `${r.status} ${JSON.stringify(after.inputs)}`);
+  r = await fetch(`http://127.0.0.1:${PORT}/api/snapshot?id=p0`, { signal: AbortSignal.timeout(20000) });
+  check('a picture stays while its window is the same', r.status === 200, r.status);
+  // Mouse moves: only the newest is kept, and only apps that send a key get them.
+  await input({ id: 'p0', kind: 'move', x: 0.1, y: 0.1 });
+  await input({ id: 'p0', kind: 'move', x: 0.2, y: 0.2 });
+  const moves = ((await getState(`?tv=1&in=0&key=${KEY2}`)).inputs || []).filter((i) => i.kind === 'move');
+  check('only the newest mouse move is kept', moves.length === 1 && moves[0].x === 0.2, JSON.stringify(moves));
+  const noKey = ((await getState('?tv=1&in=0')).inputs || []).filter((i) => i.kind === 'move');
+  check('no mouse moves for an app without a key', noKey.length === 0, JSON.stringify(noKey));
+  // A changed window drops its picture.
+  const changedWins = plain.windows.map((w) => (w.id === 'p0' ? { ...w, nonce: w.nonce + 1 } : w));
+  await fetch(`http://127.0.0.1:${PORT}/api/state`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(20000),
+    body: JSON.stringify({ layout: '1x1', windows: changedWins }) });
+  r = await fetch(`http://127.0.0.1:${PORT}/api/snapshot?id=p0`, { signal: AbortSignal.timeout(20000) });
+  check('a reloaded window drops its picture', r.status === 404, r.status);
 }

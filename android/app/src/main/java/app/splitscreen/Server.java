@@ -91,6 +91,26 @@ final class Server {
         }
     }
 
+    /** Sends a window picture. Returns 1 (keep sending), 0 (the PC says stop) or -1 (refused). */
+    static int postJpeg(String url, byte[] jpeg) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(3000);
+        c.setReadTimeout(5000);
+        c.setRequestMethod("POST");
+        c.setDoOutput(true);
+        c.setFixedLengthStreamingMode(jpeg.length);
+        c.setRequestProperty("Content-Type", "image/jpeg");
+        try (OutputStream o = c.getOutputStream()) {
+            o.write(jpeg);
+        }
+        try {
+            if (c.getResponseCode() != 200) return -1;
+            return new JSONObject(read(c.getInputStream())).optBoolean("wanted", false) ? 1 : 0;
+        } finally {
+            c.disconnect();
+        }
+    }
+
     private static String read(InputStream in) throws Exception {
         try (InputStream is = in) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();

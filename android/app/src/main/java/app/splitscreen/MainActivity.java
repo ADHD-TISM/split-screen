@@ -87,7 +87,22 @@ public class MainActivity extends Activity {
         server = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_SERVER, null);
         // For testing and scripts: adb shell am start -n app.splitscreen/.MainActivity -e server 192.168.1.50:8090
         String forced = getIntent().getStringExtra("server");
-        if (forced != null && !forced.isEmpty()) server = forced;
+        allowControl = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_ALLOW_CONTROL, false);
+        if (forced != null && !forced.isEmpty()) {
+            server = forced;
+            // Any app on the TV can start Split Screen this way, so a PC named here gets no
+            // control and no pictures for this run.
+            allowControl = false;
+            controlLocked = true;
+        }
+        snapThread = new android.os.HandlerThread("splitscreen-snap");
+        snapThread.start();
+        snapHandler = new Handler(snapThread.getLooper());
+    }
+
+    @Override protected void onDestroy() {
+        super.onDestroy();
+        snapThread.quitSafely();
     }
 
     @Override protected void onStart() {
@@ -102,6 +117,7 @@ public class MainActivity extends Activity {
         worker = new Thread(this::syncLoop, "splitscreen-sync");
         worker.start();
         main.postDelayed(reporter, 5000);
+        main.postDelayed(snapper, SNAP_EVERY_MS);
     }
 
     @Override protected void onStop() {
@@ -111,6 +127,8 @@ public class MainActivity extends Activity {
         cursor.setOn(false);
         if (worker != null) worker.interrupt();
         main.removeCallbacks(reporter);
+        main.removeCallbacks(snapper);
+        snapWanted = false;
         for (Tile t : tiles.values()) { wall.removeView(t.root); t.release(); }
         tiles.clear();
         version = 0;
@@ -180,12 +198,18 @@ public class MainActivity extends Activity {
             // 2. Long poll: the server answers at once on a change, else after 25 s.
             try {
                 // "in": the last preview click or scroll acted on, so a newer one comes at once.
-                String body = Server.get("http://" + server + "/api/state?tv=1&v=" + version + "&in=" + inputSeen, 35000);
+                // With Allow PC control on, the poll also asks for clicks, scrolls and moves ("in"),
+                // proves it is this app ("key") and says whether pictures are being sent ("snap").
+                String q = "/api/state?tv=1&v=" + version;
+                if (allowControl) q += "&in=" + inputSeen + "&key=" + APP_KEY + "&snap=" + (snapWanted ? 1 : 0);
+                String body = Server.get("http://" + server + q, 35000);
                 if (!running || worker != me) break;   // left or replaced while waiting (see above)
                 JSONObject next = new JSONObject(body);
                 failures = 0;
                 // Counted here, before the next request leaves with the new "in".
                 List<JSONObject> todo = newInputs(next);
+                boolean snap = allowControl && next.optBoolean("snap", false);   // the preview wants window pictures
+                snapWanted = snap;   // set here, so the next poll's "snap" already says it
                 if (next.optInt("version") != version) {
                     main.post(() -> { apply(next); runInputs(todo); });
                 } else {
@@ -194,6 +218,7 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception e) {
                 if (!running || worker != me) break;
+                main.post(() -> snapWanted = false);   // the PC is gone: no pictures
                 failures++;
                 if (failures == 1) say(null);
                 if (failures >= 2) say("Reconnecting to the PC…");
@@ -249,6 +274,7 @@ public class MainActivity extends Activity {
      * the count again, and the inputs there at first sight are skipped.
      */
     private List<JSONObject> newInputs(JSONObject next) {
+        if (!allowControl) return new ArrayList<>();
         String from = next.optString("inputsFrom", "");
         if (!from.equals(inputsFrom)) { inputsFrom = from; inputSeen = -1; }
         JSONArray list = next.optJSONArray("inputs");
@@ -263,6 +289,12 @@ public class MainActivity extends Activity {
                 if (seq <= top) continue;
                 top = seq;
                 if (first) continue;
+                if ("move".equals(in.optString("kind"))) {
+                    // Only the newest mouse position counts.
+                    for (int k = todo.size() - 1; k >= 0; k--) if ("move".equals(todo.get(k).optString("kind"))) todo.remove(k);
+                    todo.add(in);
+                    continue;
+                }
                 JSONObject last = todo.isEmpty() ? null : todo.get(todo.size() - 1);
                 if (last != null && "scroll".equals(in.optString("kind")) && "scroll".equals(last.optString("kind"))
                         && in.optString("id").equals(last.optString("id"))) {
@@ -284,6 +316,10 @@ public class MainActivity extends Activity {
     private void runInputs(List<JSONObject> todo) {
         long now = android.os.SystemClock.uptimeMillis();
         for (JSONObject in : todo) {
+            if ("move".equals(in.optString("kind"))) {   // no gesture: the arrow moves now
+                main.postAtTime(() -> applyInput(in), inputToken, now);
+                continue;
+            }
             long at = Math.max(now, nextGestureAt);
             nextGestureAt = at + GESTURE_GAP_MS;
             main.postAtTime(() -> applyInput(in), inputToken, at);
@@ -300,7 +336,7 @@ public class MainActivity extends Activity {
 
     /** x and y are the spot in the window (0 to 1). Only a window shown now is touched. */
     private void applyInput(JSONObject in) {
-        if (!running) return;
+        if (!running || !allowControl) return;   // turned off after it was queued
         Tile t = tiles.get(in.optString("id"));
         if (t == null || t.root.getVisibility() != View.VISIBLE || t.root.getWidth() <= 1) return;
         // The server checks these too; checked again in case the app found the wrong PC.
@@ -309,7 +345,8 @@ public class MainActivity extends Activity {
         int w = t.root.getWidth(), h = t.root.getHeight();
         float px = t.root.getLeft() + (float) Math.min(Math.max(x, 0), 1) * (w - 1);
         float py = t.root.getTop() + (float) Math.min(Math.max(y, 0), 1) * (h - 1);
-        if ("tap".equals(in.optString("kind"))) cursor.tapAt(px, py);
+        if ("move".equals(in.optString("kind"))) cursor.pointAt(px, py);
+        else if ("tap".equals(in.optString("kind"))) cursor.tapAt(px, py);
         else if ("scroll".equals(in.optString("kind")) && dy != 0) cursor.scrollAt(px, py, (float) Math.min(Math.max(dy, -3), 3));
     }
 
@@ -424,6 +461,97 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ---------- window pictures for the PC preview ----------
+
+    // While the preview is open, 1 window is captured every SNAP_EVERY_MS, in turn: 4 pictures
+    // a second in all, so the load stays the same with 1 window or 16. A picture is sent only
+    // when the one before has gone.
+    // A random key for this run of the app, sent with its polls and pictures. The PC takes
+    // pictures only with the key of the TV that polls it, so another device on the network
+    // cannot send fake ones (unless it can read this TV's traffic).
+    private static final String APP_KEY = newKey();
+    private static String newKey() {
+        byte[] b = new byte[16];
+        new java.security.SecureRandom().nextBytes(b);
+        StringBuilder s = new StringBuilder();
+        for (byte x : b) s.append(String.format("%02x", x));
+        return s.toString();
+    }
+    private static final long SNAP_EVERY_MS = 250;
+    private static final int SNAP_WIDTH = 480;   // pixels, at most
+    private static final int SNAP_QUALITY = 60;  // JPEG
+    private volatile boolean snapWanted;         // set on the main thread: from the server ("snap")
+    private int snapNext;
+    private final java.util.concurrent.atomic.AtomicBoolean snapBusy = new java.util.concurrent.atomic.AtomicBoolean();
+    private android.os.HandlerThread snapThread;   // copies, packs and sends the pictures
+    private Handler snapHandler;
+
+    private final Runnable snapper = new Runnable() {
+        @Override public void run() {
+            if (!running) return;
+            if (snapWanted && allowControl && server != null && !snapBusy.get()) captureNext();
+            // The preview asks for each window once a second: with few windows, wait longer.
+            int n = 0;
+            for (Tile t : tiles.values()) if (t.root.getVisibility() == View.VISIBLE) n++;
+            main.postDelayed(this, Math.max(SNAP_EVERY_MS, 1000 / Math.max(1, n)));
+        }
+    };
+
+    /**
+     * Takes the next shown window in turn. On Android 8 and later (Fire OS 7) the screen
+     * itself is copied (PixelCopy): the work runs off the main thread, so the TV picture does
+     * not stutter, and it shows what is really on screen, the arrow and number included.
+     * Older systems draw the window instead (Tile.capture), on the main thread.
+     */
+    private void captureNext() {
+        List<Tile> shown = new ArrayList<>();
+        for (Tile t : tiles.values()) if (t.root.getVisibility() == View.VISIBLE && t.root.getWidth() > 1) shown.add(t);
+        if (shown.isEmpty()) return;
+        Tile t = shown.get(Math.floorMod(snapNext++, shown.size()));
+        final String s = server, id = t.id;
+        final int v = version;
+        int w = t.root.getWidth(), h = t.root.getHeight();
+        float scale = Math.min(1f, SNAP_WIDTH / (float) w);
+        snapBusy.set(true);
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            int[] at = new int[2];
+            t.root.getLocationInWindow(at);
+            android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(Math.max(1, Math.round(w * scale)),
+                    Math.max(1, Math.round(h * scale)), android.graphics.Bitmap.Config.ARGB_8888);
+            android.graphics.Rect src = new android.graphics.Rect(at[0], at[1], at[0] + w, at[1] + h);
+            try {
+                android.view.PixelCopy.request(getWindow(), src, b, result -> {
+                    if (result == android.view.PixelCopy.SUCCESS) sendSnapshot(b, s, id, v);
+                    else { b.recycle(); snapBusy.set(false); }
+                }, snapHandler);
+            } catch (RuntimeException e) { b.recycle(); snapBusy.set(false); }
+            return;
+        }
+        android.graphics.Bitmap b;
+        try { b = t.capture(SNAP_WIDTH); } catch (RuntimeException e) { b = null; }   // a view that cannot draw now
+        if (b == null) { snapBusy.set(false); return; }
+        final android.graphics.Bitmap pic = b;
+        snapHandler.post(() -> sendSnapshot(pic, s, id, v));
+    }
+
+    /** On the picture thread: packs and sends 1 picture. "v" is the window list it shows. */
+    private void sendSnapshot(android.graphics.Bitmap b, String s, String id, int v) {
+        try {
+            java.io.ByteArrayOutputStream jpeg = new java.io.ByteArrayOutputStream();
+            b.compress(android.graphics.Bitmap.CompressFormat.JPEG, SNAP_QUALITY, jpeg);
+            int answer = Server.postJpeg("http://" + s + "/api/snapshot?id=" + android.net.Uri.encode(id)
+                    + "&v=" + v + "&key=" + APP_KEY, jpeg.toByteArray());
+            // Stop only when the PC says nobody watches. A refused picture (for example while
+            // the PC is busy with another one) does not stop the others.
+            if (answer == 0) main.post(() -> snapWanted = false);
+        } catch (Exception e) {
+            main.post(() -> snapWanted = false);   // the PC cannot be reached: stop until asked again
+        } finally {
+            b.recycle();
+            snapBusy.set(false);
+        }
+    }
+
     // ---------- status report to the PC ----------
 
     private final Runnable reporter = new Runnable() {
@@ -527,9 +655,21 @@ public class MainActivity extends Activity {
         in.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         in.setHint("192.168.1.50:8090");
         if (server != null) in.setText(server);
+        // Allow PC control: the preview on the PC may click, scroll and move the arrow in the
+        // windows, and gets pictures of them. Off until turned on here. It takes effect at once.
+        android.widget.CheckBox allow = new android.widget.CheckBox(this);
+        allow.setText("Allow PC control: the PC preview can click and scroll in the windows here and see pictures of them (applies at once)");
+        allow.setChecked(allowControl);
+        allow.setEnabled(!controlLocked);
+        allow.setOnCheckedChangeListener((b, on) -> setAllowControl(on));
+        android.widget.LinearLayout box = new android.widget.LinearLayout(this);
+        box.setOrientation(android.widget.LinearLayout.VERTICAL);
+        box.setPadding(40, 10, 40, 0);
+        box.addView(in);
+        box.addView(allow);
         new AlertDialog.Builder(this)
                 .setTitle("PC address (shown on the control page)")
-                .setView(in)
+                .setView(box)
                 .setPositiveButton("Connect", (d, w) -> {
                     String v = in.getText().toString().trim().replaceFirst("^https?://", "").replaceFirst("/.*$", "");
                     if (v.isEmpty()) return;
@@ -548,5 +688,26 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    // ---------- Allow PC control (MENU) ----------
+
+    private static final String KEY_ALLOW_CONTROL = "allowControl";
+    /** Off: no clicks, scrolls or moves from the preview are taken, and no pictures are sent. */
+    private volatile boolean allowControl;
+    /** Started with a "server" extra: control stays off for this run (see onCreate). */
+    private boolean controlLocked;
+
+    private void setAllowControl(boolean on) {
+        if (controlLocked) {
+            Toast.makeText(this, "Split Screen was started with a PC address by another app. Start it from Your Apps to use PC control.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        allowControl = on;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_ALLOW_CONTROL, on).apply();
+        inputSeen = -1;          // turned on: the clicks waiting now are not run
+        dropQueuedInputs();
+        snapWanted = false;
+        Toast.makeText(this, on ? "PC control on. It starts within 25 s." : "PC control off.", Toast.LENGTH_SHORT).show();
     }
 }

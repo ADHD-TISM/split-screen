@@ -32,6 +32,8 @@
   body.preview #shield { cursor:pointer; }
   .ping { position:fixed; z-index:12; width:24px; height:24px; margin:-12px 0 0 -12px; border:3px solid #4f8cff; border-radius:50%; pointer-events:none; animation:ping .5s ease-out forwards; }
   .ping.bad { border-color:#ff6b6b; }
+  /* z-index 1: above the window's own content, below small windows on top (z-index 2). */
+  .tile img.snap { display:none; z-index:1; object-fit:fill; }
   @keyframes ping { from { transform:scale(.4); opacity:1; } to { transform:scale(1.6); opacity:0; } }
 </style>
 </head>
@@ -496,6 +498,40 @@
       if (x != null) xhr.onloadend = function () { mark(x, y, xhr.status === 200); };
       xhr.send(JSON.stringify(o));
     };
+    // The mouse over a window: the TV's arrow follows it (at most 8 times a second). The TV
+    // hides the arrow after 10 s without a move.
+    var lastMove = 0, moveTimer = null, moveAt = null;
+    var sendMove = function () {
+      moveTimer = null; lastMove = Date.now();
+      var t = moveAt && tileAt(moveAt.x, moveAt.y);
+      if (t) sendInput({ id: t.id, kind: 'move', x: (moveAt.x - t.r.left) / t.r.width, y: (moveAt.y - t.r.top) / t.r.height });
+    };
+    shield.addEventListener('mousemove', function (e) {
+      moveAt = { x: e.clientX, y: e.clientY };
+      if (!moveTimer) moveTimer = setTimeout(sendMove, Math.max(0, 125 - (Date.now() - lastMove)));
+    });
+
+    // Pictures of the windows from the TV app, about every second. While a window has a recent
+    // picture, it covers this page's own copy, so the preview shows what the TV really shows.
+    // Without the TV app (or with an older one) no pictures come, and the own copy shows.
+    setInterval(function () {
+      if (document.hidden) return;
+      order.forEach(function (id) {
+        var t = tiles[id];
+        if (!t || t.snapLoading) return;
+        if (!t.snap) {
+          t.snap = document.createElement('img');
+          t.snap.className = 'snap';
+          t.el.appendChild(t.snap);
+        }
+        var img = new Image();
+        t.snapLoading = true;
+        img.onload = function () { t.snapLoading = false; t.snap.src = img.src; t.snap.style.display = 'block'; };
+        img.onerror = function () { t.snapLoading = false; t.snap.style.display = 'none'; };
+        img.src = '/api/snapshot?id=' + encodeURIComponent(id) + '&t=' + Date.now();
+      });
+    }, 1000);
+
     shield.addEventListener('click', function (e) {
       var t = tileAt(e.clientX, e.clientY);
       if (!t) return;

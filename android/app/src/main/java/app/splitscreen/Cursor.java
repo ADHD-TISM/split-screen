@@ -202,13 +202,19 @@ final class Cursor {
 
     // ---------- from the PC preview ----------
 
-    /** A click sent from the preview on the PC. The arrow moves there and shows the click. */
-    void tapAt(float px, float py) {
+    /**
+     * The PC mouse over the preview: the arrow follows it, and hides after HIDE_MS (10 s)
+     * without a move. Nothing is clicked.
+     */
+    void pointAt(float px, float py) {
         x = px; y = py;
         place();
-        arrow.setVisibility(View.VISIBLE);
-        h.removeCallbacks(hide);
-        h.postDelayed(hide, on ? HIDE_MS : 1500);   // without cursor mode: only a short flash
+        show();
+    }
+
+    /** A click sent from the preview on the PC. The arrow moves there and shows the click. */
+    void tapAt(float px, float py) {
+        pointAt(px, py);
         click();
     }
 

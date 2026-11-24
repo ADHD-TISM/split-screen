@@ -1,6 +1,8 @@
 package app.splitscreen;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.util.TypedValue;
@@ -74,6 +76,26 @@ abstract class Tile {
 
     /** Free the player or web view. */
     abstract void release();
+
+    /**
+     * A small picture of this window for the PC preview (main thread), at most maxW pixels
+     * wide, or null when the window is not laid out. Video inside a web page draws black.
+     */
+    Bitmap capture(int maxW) {
+        int w = root.getWidth(), h = root.getHeight();
+        if (w <= 1 || h <= 1) return null;
+        float s = Math.min(1f, maxW / (float) w);
+        Bitmap b = Bitmap.createBitmap(Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s)), Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(b);
+        c.drawColor(Color.BLACK);
+        c.scale(s, s);
+        root.draw(c);
+        drawVideo(c, s);
+        return b;
+    }
+
+    /** Draws a video picture that root.draw() leaves out (see StreamTile). */
+    void drawVideo(Canvas c, float scale) {}
 
     /** The Close pop-up button on the PC. Only web page windows do anything. */
     void closePopup() {}

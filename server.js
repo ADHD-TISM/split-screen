@@ -157,6 +157,11 @@ async function saveState(text) {
 function setState(next) {
   state = { ...next, version: state.version + 1 };
   inputs = [];   // clicks and scrolls were meant for the old window list
+  // A picture of a window that is gone, or now shows another page, is dropped.
+  for (const [id, s] of snapshots) {
+    const w = state.windows.find((x) => x.id === id);
+    if (!w || windowKey(w) !== s.key) snapshots.delete(id);
+  }
   const text = JSON.stringify(state, null, 2);
   unsavedText = text;   // the newest list; cleared when exactly this text reaches state.json
   saving = saving.then(() => saveState(text));
@@ -215,15 +220,19 @@ function send(res, code, body, type = 'application/json') {
   res.end(data);
 }
 
-function readBody(req) {
+// The body as text, or as bytes (asBytes), up to max bytes.
+function readBody(req, max = MAX_BODY, asBytes = false) {
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY) { reject(new Error('Body too large.')); req.destroy(); return; }
+      if (size > max) { reject(new Error('Body too large.')); req.destroy(); return; }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    let ended = false;
+    req.on('end', () => { ended = true; const b = Buffer.concat(chunks); resolve(asBytes ? b : b.toString('utf8')); });
+    // A connection closed before the body ended (cut off, or a timeout) rejects too.
+    req.on('close', () => { if (!ended) reject(new Error('Body cut off.')); });
     req.on('error', reject);
   });
 }
@@ -746,13 +755,62 @@ function freshInputs() {
   inputs = inputs.filter((i) => now - i.at < INPUT_TTL_MS);
   return inputs.map(({ at, ...i }) => i);
 }
-const tvState = () => ({ ...state, inputsFrom, inputs: freshInputs() });
+// Mouse moves only go to apps that know them (1.7 and later send "key"). App 1.6 would give
+// each move a gesture slot and run later clicks seconds late.
+// Pictures are asked only of that same app ("moves": the one that holds the place).
+const tvState = (moves) => ({ ...state, inputsFrom, inputs: freshInputs().filter((i) => moves || i.kind !== 'move'), snap: !!moves && snapWanted() });
+
+// ---------- window pictures from the TV (live preview) ----------
+// The TV app sends a small JPEG of each window (POST /api/snapshot) while someone watches the
+// preview. Only the TV app that polls (its address and random key, see noteTvApp) may send
+// them; only this PC (or, with ALLOW_REMOTE_CONTROL, other devices) may see them. They are
+// kept in memory, 1 per window.
+const MAX_SNAPSHOT_BYTES = 300 * 1024;
+// A picture is shown while it is this new, or (with many windows, where 1 round takes longer)
+// up to SNAPSHOT_KEEP_MS while the TV still sends pictures. Older: the preview shows its own copy.
+const SNAPSHOT_FRESH_MS = 5000;
+const SNAPSHOT_KEEP_MS = 20000;
+let lastSnapshotAt = 0;
+// A stalled upload (the TV lost Wi-Fi) is ended after this. Shorter in the tests.
+const SNAPSHOT_UPLOAD_TIMEOUT_MS = Math.min(60000, Math.max(200, Number(process.env.SNAPSHOT_UPLOAD_TIMEOUT_MS) || 10000));
+const SNAPSHOT_WANTED_MS = 5000;     // the TV stops capturing this long after the preview stops asking
+const snapshots = new Map();         // window id -> { jpeg, at, key }
+let snapshotsAskedAt = 0;
+let snapshotUploading = false;       // 1 upload at a time
+// The TV app that may send pictures: its address and the random key it polls with. Another
+// device takes over only after this one has not polled for TV_APP_GONE_MS.
+let tvApp = null;                    // { address, key, seenAt }
+const TV_APP_GONE_MS = 40000;
+const snapWanted = () => Date.now() - snapshotsAskedAt < SNAPSHOT_WANTED_MS;
+function noteTvApp(req, key) {
+  const now = Date.now(), address = req.socket.remoteAddress;
+  // The same address may change its key (the app restarted); another one waits until it is gone.
+  if (!tvApp || tvApp.address === address || now - tvApp.seenAt > TV_APP_GONE_MS) tvApp = { address, key, seenAt: now };
+}
+// A request a web page on another site made (a browser marks it). Those never claim the TV
+// app's place, send pictures, or ask for them.
+function crossSite(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return true;
+  const origin = req.headers.origin;
+  if (origin) { try { return new URL(origin).host !== req.headers.host; } catch { return true; } }
+  return false;
+}
+const windowKey = (w) => w.url + '#' + w.nonce;
+function askSnapshots() {
+  const was = snapWanted();
+  snapshotsAskedAt = Date.now();
+  // Tell the TV app at once, not at its next poll answer (up to 25 s later).
+  if (!was) for (const w of [...waiters]) if (w.moves) w(tvState(true));
+}
 function pushInput(input) {
   freshInputs();
+  // Only the newest mouse position counts: older ones never fill the list.
+  if (input.kind === 'move') inputs = inputs.filter((i) => i.kind !== 'move');
   inputs = inputs.slice(-(MAX_INPUTS - 1));
   inputs.push({ ...input, seq: ++inputSeq, at: Date.now() });
-  // Wake only the TV apps that take inputs. Others have nothing new to show.
-  for (const w of [...waiters]) if (w.inputs) w(tvState());
+  // Wake only the TV apps that take inputs (moves: only those that know them).
+  for (const w of [...waiters]) if (w.inputs && (input.kind !== 'move' || w.moves)) w(tvState(w.moves));
 }
 
 // ---------- routes ----------
@@ -784,13 +842,25 @@ const server = http.createServer(async (req, res) => {
       const inRaw = url.searchParams.get('in');
       const wantsInputs = isTv && inRaw !== null && /^-?\d{1,15}$/.test(inRaw);
       const seen = wantsInputs ? Number(inRaw) : NaN;
-      const current = () => (wantsInputs ? tvState() : state);
-      const newInput = wantsInputs && inputs.length > 0 && Number.isFinite(seen) && freshInputs().some((i) => i.seq > seen);
-      if (!since || since !== state.version || newInput) return send(res, 200, current());
+      // The TV app (1.7 and later) sends a random key with its polls; the same key must come
+      // with its pictures. Only those apps get mouse moves.
+      const appKey = url.searchParams.get('key') || '';
+      const hasKey = wantsInputs && /^[0-9a-f]{16,64}$/.test(appKey) && !crossSite(req);
+      if (hasKey) noteTvApp(req, appKey);
+      // Mouse moves only go to the TV app that holds the place (its address and key).
+      const keyed = hasKey && !!tvApp && tvApp.address === req.socket.remoteAddress && tvApp.key === appKey;
+      const current = () => (wantsInputs ? tvState(keyed) : state);
+      const newInput = wantsInputs && inputs.length > 0 && Number.isFinite(seen)
+        && freshInputs().some((i) => i.seq > seen && (keyed || i.kind !== 'move'));
+      // "snap" is whether the app sends pictures now: answer at once when that should change.
+      const snapNow = url.searchParams.get('snap');
+      const snapChange = keyed && (snapNow === '0' || snapNow === '1') && (snapNow === '1') !== snapWanted();
+      if (!since || since !== state.version || newInput || snapChange) return send(res, 200, current());
       // Long poll: answer when the state changes, or after LONG_POLL_MS.
       const done = (payload) => { clearTimeout(t); waiters.delete(done); if (!res.writableEnded) send(res, 200, payload || current()); };
       done.tv = isTv;   // only TVs get the stop message (notifyStopped)
       done.inputs = wantsInputs;   // only these are woken by a click or scroll (pushInput)
+      done.moves = keyed;          // and only these by a mouse move
       const t = setTimeout(done, LONG_POLL_MS);
       waiters.add(done);
       req.on('close', () => { clearTimeout(t); waiters.delete(done); });
@@ -817,15 +887,53 @@ const server = http.createServer(async (req, res) => {
       const x = part(b.x), y = part(b.y);
       if (x === null || y === null) return send(res, 400, { error: 'Bad position.' });
       const dy = Number.isFinite(b.dy) ? Math.min(3, Math.max(-3, Math.round(b.dy * 1000) / 1000)) : 0;
-      if (b.kind === 'tap') pushInput({ id, kind: 'tap', x, y });
+      if (b.kind === 'tap' || b.kind === 'move') pushInput({ id, kind: b.kind, x, y });
       else if (b.kind === 'scroll' && dy !== 0) pushInput({ id, kind: 'scroll', x, y, dy });
       else return send(res, 400, { error: 'Bad input.' });
       return send(res, 200, { ok: true });
     }
+    if (p === '/api/snapshot' && req.method === 'POST') {
+      // A JPEG of 1 window, from the TV app. The answer says whether to keep sending.
+      if (crossSite(req) || !tvApp || req.socket.remoteAddress !== tvApp.address || url.searchParams.get('key') !== tvApp.key) {
+        return send(res, 403, { error: 'Only the TV app sends pictures.' });
+      }
+      const id = url.searchParams.get('id') || '';
+      if (snapshotUploading) return send(res, 429, { error: 'One picture at a time.' });
+      snapshotUploading = true;
+      // A stalled upload (the TV lost Wi-Fi) must not block the next ones for minutes.
+      req.setTimeout(SNAPSHOT_UPLOAD_TIMEOUT_MS, () => req.destroy(new Error('Upload too slow.')));
+      let jpeg;
+      try { jpeg = await readBody(req, MAX_SNAPSHOT_BYTES, true); } finally { snapshotUploading = false; }
+      if (jpeg.length < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 || jpeg[2] !== 0xff) return send(res, 400, { error: 'Send a JPEG.' });
+      lastSnapshotAt = Date.now();
+      // Kept only for a window that is still the same, in the list the TV had when it took
+      // the picture ("v"). A picture of a window that is gone or changed is dropped, without
+      // an error: the TV keeps sending the others.
+      const w = state.windows.find((x) => x.id === id);
+      if (w && Number(url.searchParams.get('v')) === state.version) snapshots.set(id, { jpeg, at: lastSnapshotAt, key: windowKey(w) });
+      return send(res, 200, { wanted: snapWanted() });
+    }
+    if (p === '/api/snapshot' && req.method === 'GET') {
+      // The newest picture of 1 window, for the preview. Asking also tells the TV to send them.
+      if (!isLocal(req) && !ALLOW_REMOTE_CONTROL) return send(res, 403, { error: 'Control is allowed from this PC only.' });
+      if (crossSite(req)) return send(res, 403, { error: 'Not from another site.' });
+      askSnapshots();
+      const s = snapshots.get(url.searchParams.get('id') || '');
+      const now = Date.now();
+      const fresh = s && (now - s.at < SNAPSHOT_FRESH_MS || (now - lastSnapshotAt < SNAPSHOT_FRESH_MS && now - s.at < SNAPSHOT_KEEP_MS));
+      if (!fresh) return send(res, 404, { error: 'No recent picture.' });
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': 'sandbox' });
+      return res.end(s.jpeg);
+    }
     if (p === '/api/info' && req.method === 'GET') {
       const tvSecondsAgo = tvLastSeen ? Math.round((Date.now() - tvLastSeen) / 1000) : null;
+      // Whether a TV app with "Allow PC control" on polls now (it sends its key then).
+      const tvControl = !!tvApp && Date.now() - tvApp.seenAt < TV_APP_GONE_MS;
+      // Its address, so you can check it is your TV (another device on the network could take
+      // the place while no TV app holds it).
+      const tvControlFrom = tvControl ? String(tvApp.address).replace(/^::ffff:/, '') : null;
       return send(res, 200, {
-        port, ips: lanAddresses(), mediaDir: MEDIA_DIR, tvSecondsAgo,
+        port, ips: lanAddresses(), mediaDir: MEDIA_DIR, tvSecondsAgo, tvControl, tvControlFrom,
         statuses: tvSecondsAgo !== null && tvSecondsAgo < 40 ? tvStatuses : {},
       });
     }

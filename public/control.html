@@ -68,8 +68,10 @@
   <div class="panel">
     <div class="row">
       <button id="previewToggle" aria-expanded="false" aria-controls="previewBox">Show preview</button>
-      <span class="status" style="margin:0">The windows as set on this PC. Click or scroll a window here to click or scroll it on the TV (Fire TV app). The preview's own copy does not move, so check the TV. Video players are muted; web pages may still play sound. It plays every window on this PC too, so it uses more network.</span>
+      <span class="status" style="margin:0">With the Fire TV app 1.7 and later and <b>Allow PC control</b> turned on in its MENU, it shows pictures from the TV (about 1 per second per window, at most 4 a second in all), and moving the mouse, clicking or scrolling on a window here does it on the TV. Otherwise it shows the PC's own copy of each window. Video players are muted; web pages may still play sound. It plays every window on this PC too, so it uses more network.</span>
     </div>
+    <div class="status" id="controlFrom" hidden></div>
+    <div class="status" id="controlNote" hidden>The TV does not take control from the PC. With the Fire TV app 1.7 and later, press <b>MENU (≡)</b> in the Split Screen app and turn on <b>Allow PC control</b>.</div>
     <div id="previewBox" hidden><iframe id="preview" title="Preview of the TV"></iframe></div>
   </div>
 
@@ -262,6 +264,11 @@ async function info() {
     $('status').innerHTML = s !== null && s < 40 ? '<span class="ok">● TV connected</span>' : '<span class="bad">● TV not connected yet</span>';
     lastStatuses = j.statuses || {};
     showStatuses();
+    // A TV is connected but does not allow control: say how to turn it on.
+    $('controlNote').hidden = !(s !== null && s < 40 && !j.tvControl);
+    // Which device takes control and sends pictures: it should be your TV's address.
+    $('controlFrom').hidden = !j.tvControl;
+    $('controlFrom').textContent = j.tvControl ? 'PC control is on for the TV app at ' + j.tvControlFrom + '. If that is not your TV, stop Split Screen.' : '';
     serverUp = true; syncPreview();
   } catch {
     $('status').innerHTML = '<span class="bad">● Split Screen is stopped. Start SplitScreen.exe (or start-split-screen.bat).</span>';
