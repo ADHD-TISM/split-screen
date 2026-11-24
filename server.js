@@ -312,7 +312,7 @@ const learnedHosts = new Set();
 const refusalLogged = new Map();   // host -> time of the last log line about it
 const MAX_REWRITTEN_CHARS = 8 * 1024 * 1024;   // a rewritten playlist (real ones are a few KB)
 const MAX_REWRITE_WORK = 64 * 1024 * 1024;     // characters parsed while rewriting (see rewritePlaylist)
-// Playlist reads at once (see relay): 2 per window (a master and a variant playlist) at the most.
+// Playlist reads at once (see relayPlaylist): 2 per window (a master and a variant playlist) at the most.
 // Reads hold at most 32 x 4 MB. The rewrite runs 1 at a time and adds up to about 8 MB of text
 // (plus the working copies it makes). A name-only link (which may be a segment) takes a slot
 // only while its start is checked.
@@ -444,6 +444,14 @@ function literalRefused(u, allowPrivate) {
   const literal = u.hostname.replace(/^\[|\]$/g, '');
   return net.isIP(literal) !== 0 && (isLoopbackIp(literal) || (!allowPrivate && isPrivateIp(literal)));
 }
+// At most MAX_LEARNED_HOSTS. A Set keeps insertion order, so the host learned longest ago goes
+// first. A learned host that is relayed again moves to the end.
+const MAX_LEARNED_HOSTS = 500;
+function learnHost(host) {
+  learnedHosts.delete(host);
+  if (learnedHosts.size >= MAX_LEARNED_HOSTS) learnedHosts.delete(learnedHosts.values().next().value);
+  learnedHosts.add(host);
+}
 // ---- relay rules: end ----
 
 // The next piece of a response body, or null at the end. After a piece the stream is paused again,
@@ -493,11 +501,6 @@ function relayGet(u, headers, signal, allowPrivate) {
   });
 }
 
-function learnHost(host) {
-  if (learnedHosts.size > 500) learnedHosts.clear();
-  learnedHosts.add(host);
-}
-
 // Point every link in an HLS playlist back through the relay. Each short link grows into a full
 // relay link (with the whole base address), so the result is capped too (MAX_REWRITTEN_CHARS).
 // It is counted where each link is made, not per line: 1 line with many URI="a" must not build
@@ -507,6 +510,7 @@ function learnHost(host) {
 function rewritePlaylist(text, base) {
   let chars = 0;
   let work = 0;
+  const hosts = new Set();   // learned only once the whole rewrite has worked, 1 time per host
   const tooBig = () => Object.assign(new Error('Playlist too large.'), { code: 'ETOOBIG' });
   const grow = (n) => {
     chars += n;
@@ -517,7 +521,7 @@ function rewritePlaylist(text, base) {
     if (work > MAX_REWRITE_WORK) throw tooBig();
     if (!URL.canParse(ref, base)) return ref;   // cheaper than a throw and catch per bad link
     const abs = new URL(ref, base);
-    learnHost(abs.host);
+    hosts.add(abs.host);
     const link = '/relay?u=' + encodeURIComponent(abs.href);
     grow(link.length);
     return link;
@@ -534,7 +538,60 @@ function rewritePlaylist(text, base) {
       out.push(toRelay(t));
     }
   }
+  for (const h of hosts) learnHost(h);
   return out.join('\n');
+}
+
+// Follow redirects by hand, so every hop gets the same checks as the first one. Resolves with the
+// answer that is not a redirect and the link it came from. An error carries the hop it failed on
+// (e.url), for the log.
+async function relayFollow(u, headers, signal) {
+  let at = u;
+  try {
+    for (let hop = 0; ; hop++) {
+      const up = await relayGet(at, headers, signal, privateAllowed(at));
+      const loc = up.headers.location;
+      if (![301, 302, 303, 307, 308].includes(up.statusCode) || !loc) return { up, finalUrl: at };
+      up.resume();   // drop the redirect's own body
+      if (hop >= MAX_REDIRECTS) throw new Error('too many redirects');
+      const next = new URL(loc, at);
+      if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error('redirect to a non-web address');
+      at = next;   // learned by the caller, only once it has answered
+    }
+  } catch (e) {
+    e.url = at;
+    throw e;
+  }
+}
+
+// The TV only shows "blocked": the log says which host and why. At most once a minute per host
+// and for at most 100 hosts a minute, so a playlist naming many hosts cannot flood it.
+function logRefusal(host, why) {
+  const now = Date.now();
+  if ((refusalLogged.get(host) || 0) >= now - 60000) return;
+  if (refusalLogged.size >= 100) for (const [h, t] of refusalLogged) if (t < now - 60000) refusalLogged.delete(h);
+  if (refusalLogged.size >= 100) return;
+  refusalLogged.set(host, now);
+  console.log(`Relay refused ${host}: ${why}. See "Live streams" in the README.`);
+}
+
+// No CORS header: the TV page and the TV app fetch the relay from this server's own address,
+// so other websites have no reason to read it.
+//
+// The relay answers from this server's own address. A relayed web page would run there with
+// the control page's trust (on this PC: 127.0.0.1, see isLocal). So nothing relayed may run:
+// sandbox and nosniff, and only media types pass (see MEDIA_TYPE); anything else is sent as bytes.
+const RELAY_ANSWER = Object.freeze({ 'Cache-Control': 'no-store', 'Content-Security-Policy': 'sandbox', 'X-Content-Type-Options': 'nosniff' });
+
+// Headers for passing the body on as it comes. A decoded body has a new length, no encoding,
+// and no byte ranges (those counted the packed bytes).
+function passOn(up, contentType, decoded) {
+  const o = { ...RELAY_ANSWER };
+  // content-encoding: in case the upstream compresses anyway, so the TV can still decode it.
+  const keep = decoded ? [] : ['content-length', 'content-range', 'accept-ranges', 'content-encoding'];
+  for (const h of keep) if (up.headers[h]) o[h] = up.headers[h];
+  o['content-type'] = contentType;
+  return o;
 }
 
 async function relay(req, res, target) {
@@ -549,33 +606,14 @@ async function relay(req, res, target) {
   const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) SplitScreen/1.0', Accept: '*/*', 'Accept-Encoding': 'identity' };
   if (req.headers.range) headers.Range = req.headers.range;
 
-  // Follow redirects by hand, so every hop gets the same checks as the first one.
   let up;
-  let finalUrl = u;
+  let finalUrl;
   try {
-    for (let hop = 0; ; hop++) {
-      up = await relayGet(finalUrl, headers, ctrl.signal, privateAllowed(finalUrl));
-      const loc = up.headers.location;
-      if (![301, 302, 303, 307, 308].includes(up.statusCode) || !loc) break;
-      up.resume();   // drop the redirect's own body
-      if (hop >= MAX_REDIRECTS) throw new Error('too many redirects');
-      const next = new URL(loc, finalUrl);
-      if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error('redirect to a non-web address');
-      finalUrl = next;   // learned below, only once it has answered
-    }
+    ({ up, finalUrl } = await relayFollow(u, headers, ctrl.signal));
   } catch (e) {
     clearTimeout(headerTimer);
     if (e.code === 'EPRIVATE') {
-      // The TV only shows "blocked": the log says which host and why. At most once a minute per
-      // host and for at most 100 hosts a minute, so a playlist naming many hosts cannot flood it.
-      const now = Date.now();
-      if ((refusalLogged.get(finalUrl.host) || 0) < now - 60000) {
-        if (refusalLogged.size >= 100) for (const [h, t] of refusalLogged) if (t < now - 60000) refusalLogged.delete(h);
-        if (refusalLogged.size < 100) {
-          refusalLogged.set(finalUrl.host, now);
-          console.log(`Relay refused ${finalUrl.host}: ${e.message}. See "Live streams" in the README.`);
-        }
-      }
+      logRefusal(e.url.host, e.message);
       if (!res.headersSent) send(res, 403, { error: 'Not relayed: ' + e.message });
       return;
     }
@@ -583,6 +621,10 @@ async function relay(req, res, target) {
     return;
   }
   clearTimeout(headerTimer);
+  // The link asked for is refreshed only if it was learned (a listed one is allowed by the window
+  // list). The host that answered is learned below, even when it is listed; a learned host can
+  // reach only public addresses (see privateAllowed).
+  if (learnedHosts.has(u.host)) learnHost(u.host);
   learnHost(finalUrl.host);
   const type = up.headers['content-type'] || '';
   // A playlist by its type, or by .m3u or .m3u8 anywhere in the link (path or query, of the link
@@ -593,7 +635,16 @@ async function relay(req, res, target) {
   const byType = /mpegurl/i.test(type);
   const byName = [u, finalUrl].some((x) => /\.m3u8?/i.test(x.pathname + x.search));
   const okStatus = up.statusCode >= 200 && up.statusCode < 300;
-  const isPlaylist = (byType || byName) && okStatus;
+  if ((byType || byName) && okStatus) return relayPlaylist(req, res, { up, ctrl, type, byType, finalUrl });
+
+  res.writeHead(up.statusCode, passOn(up, relayType(type)));
+  if (req.method === 'HEAD') { up.destroy(); return res.end(); }
+  // pipeline closes both ends when either side fails or the TV cancels.
+  pipeline(up, res, () => {});
+}
+
+// A playlist (or a link that may be one): read it, rewrite its links through the relay, answer.
+async function relayPlaylist(req, res, { up, ctrl, type, byType, finalUrl }) {
   // The relay asks for no compression, but some servers compress anyway. A playlist must be read
   // as text, so a compressed one is unpacked first (and passed on unpacked). An empty body is
   // left as it is (zlib refuses 0 bytes). An encoding the relay does not know is often a wrong
@@ -604,90 +655,67 @@ async function relay(req, res, target) {
   const unpack = { gzip: zlib.createGunzip, 'x-gzip': zlib.createGunzip, deflate: zlib.createInflate, br: zlib.createBrotliDecompress }[enc];
   const unknownEnc = enc !== 'identity' && !unpack;
   const emptyBody = up.statusCode === 204 || up.headers['content-length'] === '0';
-  // No CORS header: the TV page and the TV app fetch the relay from this server's own address,
-  // so other websites have no reason to read it.
-  // The relay answers from this server's own address. A relayed web page would run there with
-  // the control page's trust (on this PC: 127.0.0.1, see isLocal). So nothing relayed may run:
-  // sandbox and nosniff, and only media types pass (see MEDIA_TYPE); anything else is sent as bytes.
-  const out = { 'Cache-Control': 'no-store', 'Content-Security-Policy': 'sandbox', 'X-Content-Type-Options': 'nosniff' };
 
-  // Headers for passing the body on as it comes. A decoded body has a new length, no encoding,
-  // and no byte ranges (those counted the packed bytes).
-  const passOn = (contentType, decoded) => {
-    const o = { ...out };
-    // content-encoding: in case the upstream compresses anyway, so the TV can still decode it.
-    const keep = decoded ? [] : ['content-length', 'content-range', 'accept-ranges', 'content-encoding'];
-    for (const h of keep) if (up.headers[h]) o[h] = up.headers[h];
-    o['content-type'] = contentType;
-    return o;
-  };
-
-  if (isPlaylist) {
-    // Each playlist read can hold up to 4 MB, and a small packed body can unpack to that much.
-    // So only MAX_PLAYLIST_READS run at once; the TV retries a busy answer.
-    if (playlistReads >= MAX_PLAYLIST_READS) { up.destroy(); return send(res, 503, { error: 'Relay busy, try again.' }); }
-    const decoded = !!unpack && !emptyBody;
-    // The body can fail mid-read (the TV cancels, or the stream drops). Answer 502, never crash.
-    const bodyTimer = setTimeout(() => ctrl.abort(), RELAY_HEADER_TIMEOUT_MS);
-    playlistReads++;   // counted down in finally, so nothing may come between this line and try
-    try {
-      const src = decoded ? pipeline(up, unpack(), () => {}) : up;
-      const chunks = [];
-      let size = 0;
-      // A body cut short by the timer can end without an error: answer 502, not a broken playlist.
-      const timedOut = () => {
-        if (ctrl.signal.aborted) throw Object.assign(new Error('cancelled or timed out'), { name: 'AbortError' });
-      };
-      if (!byType || unknownEnc) {
-        // Found by name only, or in an unknown encoding: look at the start. Not a playlist (or
-        // empty): pass it all on as it is.
-        const { pieces, ended } = await bodyStart(src);
-        timedOut();
-        const head = Buffer.concat(pieces);
-        if (!/^\s*#EXTM3U/.test(head.toString('utf8'))) {   // \s also skips a byte-order mark
-          clearTimeout(bodyTimer);
-          if (byType) {
-            // Typed as a playlist but in an encoding the relay cannot read: it cannot be rewritten,
-            // and passed on as it is its links would skip the relay. Say so instead.
-            src.destroy(); up.destroy();
-            const name = /^[a-z0-9-]{1,20}$/.test(enc) ? enc : 'not known';
-            return send(res, 502, { error: `Not a playlist the relay can read (encoding ${name}).` });
-          }
-          // An unpacked part (206) has no byte range any more, so it is sent as a whole answer.
-          res.writeHead(decoded && up.statusCode === 206 ? 200 : up.statusCode, passOn(relayType(type), decoded));
-          if (req.method === 'HEAD') { src.destroy(); up.destroy(); return res.end(); }
-          if (ended) return res.end(head);
-          res.write(head);
-          pipeline(src, res, () => {});
-          return;
-        }
-        chunks.push(head);
-        size += head.length;
-      }
-      for await (const c of src) {
-        size += c.length;
-        if (size > MAX_PLAYLIST_BYTES) { src.destroy(); up.destroy(); return send(res, 502, { error: 'Playlist too large.' }); }
-        chunks.push(c);
-      }
+  // Each playlist read can hold up to 4 MB, and a small packed body can unpack to that much.
+  // So only MAX_PLAYLIST_READS run at once; the TV retries a busy answer.
+  if (playlistReads >= MAX_PLAYLIST_READS) { up.destroy(); return send(res, 503, { error: 'Relay busy, try again.' }); }
+  const decoded = !!unpack && !emptyBody;
+  // The body can fail mid-read (the TV cancels, or the stream drops). Answer 502, never crash.
+  const bodyTimer = setTimeout(() => ctrl.abort(), RELAY_HEADER_TIMEOUT_MS);
+  playlistReads++;   // counted down in finally, so nothing may come between this line and try
+  try {
+    const src = decoded ? pipeline(up, unpack(), () => {}) : up;
+    const chunks = [];
+    let size = 0;
+    // A body cut short by the timer can end without an error: answer 502, not a broken playlist.
+    const timedOut = () => {
+      if (ctrl.signal.aborted) throw Object.assign(new Error('cancelled or timed out'), { name: 'AbortError' });
+    };
+    if (!byType || unknownEnc) {
+      // Found by name only, or in an unknown encoding: look at the start. Not a playlist (or
+      // empty): pass it all on as it is.
+      const { pieces, ended } = await bodyStart(src);
       timedOut();
-      // Rewritten inside the count, so the slot also covers the rewrite.
-      const body = rewritePlaylist(Buffer.concat(chunks).toString('utf8'), finalUrl.href);
-      res.writeHead(200, { ...out, 'Content-Type': 'application/vnd.apple.mpegurl' });
-      return res.end(body);
-    } catch (e) {
-      const why = e.code === 'ETOOBIG' ? e.message : 'Playlist read failed: ' + (e.name === 'AbortError' ? 'cancelled or timed out' : e.message);
-      if (!res.headersSent && !res.destroyed) send(res, 502, { error: why });
-      else res.destroy();
-      return;
-    } finally {
-      clearTimeout(bodyTimer);
-      playlistReads--;   // the read is over (a non-playlist streams on outside this count)
+      const head = Buffer.concat(pieces);
+      if (!/^\s*#EXTM3U/.test(head.toString('utf8'))) {   // \s also skips a byte-order mark
+        clearTimeout(bodyTimer);
+        if (byType) {
+          // Typed as a playlist but in an encoding the relay cannot read: it cannot be rewritten,
+          // and passed on as it is its links would skip the relay. Say so instead.
+          src.destroy(); up.destroy();
+          const name = /^[a-z0-9-]{1,20}$/.test(enc) ? enc : 'not known';
+          return send(res, 502, { error: `Not a playlist the relay can read (encoding ${name}).` });
+        }
+        // An unpacked part (206) has no byte range any more, so it is sent as a whole answer.
+        res.writeHead(decoded && up.statusCode === 206 ? 200 : up.statusCode, passOn(up, relayType(type), decoded));
+        if (req.method === 'HEAD') { src.destroy(); up.destroy(); return res.end(); }
+        if (ended) return res.end(head);
+        res.write(head);
+        pipeline(src, res, () => {});
+        return;
+      }
+      chunks.push(head);
+      size += head.length;
     }
+    for await (const c of src) {
+      size += c.length;
+      if (size > MAX_PLAYLIST_BYTES) { src.destroy(); up.destroy(); return send(res, 502, { error: 'Playlist too large.' }); }
+      chunks.push(c);
+    }
+    timedOut();
+    // Rewritten inside the count, so the slot also covers the rewrite.
+    const body = rewritePlaylist(Buffer.concat(chunks).toString('utf8'), finalUrl.href);
+    res.writeHead(200, { ...RELAY_ANSWER, 'Content-Type': 'application/vnd.apple.mpegurl' });
+    return res.end(body);
+  } catch (e) {
+    const why = e.code === 'ETOOBIG' ? e.message : 'Playlist read failed: ' + (e.name === 'AbortError' ? 'cancelled or timed out' : e.message);
+    if (!res.headersSent && !res.destroyed) send(res, 502, { error: why });
+    else res.destroy();
+    return;
+  } finally {
+    clearTimeout(bodyTimer);
+    playlistReads--;   // the read is over (a non-playlist streams on outside this count)
   }
-  res.writeHead(up.statusCode, passOn(relayType(type)));
-  if (req.method === 'HEAD') { up.destroy(); return res.end(); }
-  // pipeline closes both ends when either side fails or the TV cancels.
-  pipeline(up, res, () => {});
 }
 
 // ---------- TV status reports ----------
@@ -1018,10 +1046,8 @@ server.on('listening', () => {
 // ---------- discovery for the TV app ----------
 // The Fire TV app broadcasts "SPLITSCREEN_DISCOVER" on UDP 47390. We answer with the
 // HTTP port, so the app finds the PC even when the port changed.
-// The app's old name, TV Wall, sent "TVWALL_DISCOVER": still answered, so an installed
-// TV Wall app keeps working until it is replaced. Remove in a later version.
 const DISCOVERY_PORT = Number(process.env.DISCOVERY_PORT) || 47390;
-const DISCOVERY_APPS = { SPLITSCREEN_DISCOVER: 'splitscreen', TVWALL_DISCOVER: 'tvwall' };
+const DISCOVERY_APPS = { SPLITSCREEN_DISCOVER: 'splitscreen' };
 // No reuseAddr: only 1 copy of Split Screen can answer. A 2nd copy logs "discovery is off".
 const disco = dgram.createSocket({ type: 'udp4' });
 disco.on('message', (msg, rinfo) => {

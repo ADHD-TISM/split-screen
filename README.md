@@ -2,18 +2,6 @@
 
 Play up to 16 URLs at once on a TV (built for the Hisense 75QD7QF). You control it from your PC. The TV shows the windows.
 
-## Upgrade from TV Wall
-
-Split Screen was called TV Wall before release 1.1. To move an existing install over, do these steps 1 time:
-
-1. In the old TV Wall tray icon, turn **Start with Windows** off. Then click **Quit TV Wall**. If you used `start-tv-wall.bat`, close its window instead.
-2. Move `state.json` and the `media` folder from the folder with `TVWall.exe` (in a copy of the project, `tv-wall`) into the folder with `SplitScreen.exe` (in a copy of the project, `split-screen`). Your window list and files come with them.
-3. Delete `TVWall.exe`. If it stays, an old sign-in entry or a double-click can start it instead of Split Screen. In a copy of the project, delete the whole old `tv-wall` folder.
-4. Start `SplitScreen.exe` (or `start-split-screen.bat`). If you want it, turn **Start with Windows** on again in its tray icon.
-5. On the TV, uninstall the **TV Wall** app (**Settings > Applications > Manage Installed Applications > TV Wall > Uninstall**). Then install Split Screen (see **Fire TV app**, steps 6-9). It finds the PC by itself. If you typed the PC address in the old app's MENU dialog, type it again.
-
-> **NOTE:** Until you replace it, the old TV Wall app still finds and plays from Split Screen.
-
 ## Start
 
 > **WARNING:** The PC and the TV must be on the same Wi-Fi or router.
@@ -27,7 +15,7 @@ Split Screen was called TV Wall before release 1.1. To move an existing install 
 
 1. Double-click `SplitScreen.exe`. No window opens. A Split Screen icon appears in the taskbar tray, by the clock, and the control page opens in your browser.
 2. If Windows shows **Windows protected your PC**, click **More info > Run anyway**. This appears for a downloaded copy, because the .exe is not signed.
-3. If Windows Firewall asks about Split Screen, allow **Private networks**. The TV cannot connect without this.
+3. If Windows Firewall asks about Split Screen, allow **Private networks** only, never Public. The TV cannot connect without this. If Windows shows your home network as Public, set it to Private: **Settings > Network & internet > Wi-Fi** (or **Ethernet**) **> your network > Network profile type > Private network**.
 4. To stop Split Screen, right-click the tray icon and click **Quit Split Screen**.
 
 **Tray icon:**
@@ -41,7 +29,7 @@ Split Screen was called TV Wall before release 1.1. To move an existing install 
 | Right-click > **Start with Windows** | Turns starting at sign-in on or off. A check mark shows it is on. At sign-in, Split Screen starts in the tray without opening the control page. |
 | Right-click > **Quit Split Screen** | Stops Split Screen. The icon goes away. |
 
-- When Split Screen stops (**Quit Split Screen**, **Stop Split Screen** on the control page, or closing the `start-split-screen.bat` window), the TV clears its windows and shows **Split Screen was stopped on the PC**. Your window list stays saved. When Split Screen starts again, the TV shows the windows again by itself. Old TV Wall apps before version 1.4 clear the windows without the message.
+- When Split Screen stops (**Quit Split Screen**, **Stop Split Screen** on the control page, or closing the `start-split-screen.bat` window), the TV clears its windows and shows **Split Screen was stopped on the PC**. Your window list stays saved. When Split Screen starts again, the TV shows the windows again by itself.
 - If the PC sleeps, shuts down, or Split Screen is ended in Task Manager, no stop message is sent. The TV keeps playing streams it loads directly and shows **Reconnecting to the PC…**. Close the app on the TV with BACK 2 times to stop them.
 - **Start with Windows** adds Split Screen to your own sign-in programs (no admin rights needed).
   - It also shows in **Task Manager > Startup apps**, as **Split Screen** (a copy built before version 1.1 shows **Node.js JavaScript Runtime**). You can turn it off there too; the tray check mark then clears. Turning it on in the tray turns it back on.
@@ -176,7 +164,7 @@ The app file is `SplitScreen.apk` in this folder. It is stored in git, so it com
 8. Select **Done**. When Downloader asks, select **Delete** to remove the downloaded file. The app stays installed.
 9. Open **Split Screen** from **Your Apps & Channels**. It finds the PC by itself.
 
-**Update the app:** do steps 1, 6, 7 and 8 again. Your settings stay. (From the old TV Wall app, see **Upgrade from TV Wall** instead.) The app shows its version in **Settings > Applications > Manage Installed Applications > Split Screen**.
+**Update the app:** do steps 1, 6, 7 and 8 again. Your settings stay. The app shows its version in **Settings > Applications > Manage Installed Applications > Split Screen**.
 
 > **CAUTION:** Build every new `SplitScreen.apk` on the same PC. The app is signed with that PC's Android debug key. An APK built on another PC fails to install over the old one with **App not installed**. Then uninstall Split Screen on the TV first. This clears the saved PC address; the app finds the PC again by itself.
 

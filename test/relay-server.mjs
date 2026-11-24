@@ -75,7 +75,8 @@ const routes = {
   // 1 line with many short URIs under a long base address: must stop at the cap, not use up memory.
   '/bomb-redir.m3u8': (res) => send(res, 302, { location: `${LONG_DIR}/bomb.m3u8` }),
   [`${LONG_DIR}/bomb.m3u8`]: (res) => send(res, 200, { 'content-type': 'application/vnd.apple.mpegurl' }, '#EXTM3U\n#EXT-X-KEY:' + 'URI="a"'.repeat(550000)),   // under the 4 MB read limit
-  // Links that do not parse, under the long base: the rewrite must not block the server for long.
+  // Links that do not parse, under the long base: the work cap must stop the rewrite early, so it
+  // cannot block the server for long. (Under a short base the cap is not reached; this does not test that.)
   '/slow-redir.m3u8': (res) => send(res, 302, { location: `${LONG_DIR}/slow.m3u8` }),
   [`${LONG_DIR}/slow.m3u8`]: (res) => send(res, 200, { 'content-type': 'application/vnd.apple.mpegurl' }, '#EXTM3U\n' + '//[\n'.repeat(1000000)),   // under the 4 MB read limit, so the work cap is what stops it
   '/xfoo.m3u8': (res) => send(res, 200, { 'content-type': 'application/vnd.apple.mpegurl', 'content-encoding': 'x-foo' }, Buffer.from([1, 2, 3, 4, 5, 6, 7, 8])),

@@ -42,7 +42,7 @@ const dns = { lookup: (name, options, cb) => {
 const rules = new Function('os', 'net', 'dns', 'state', 'learnedHosts', `'use strict';
   ${block}
   return { isPrivateIp, isLoopbackIp, localStyleHost, privateAllowed, relayAllowed, listedHost, relayType,
-    relayLookup, literalRefused };`)(os, net, dns, state, learnedHosts);
+    relayLookup, literalRefused, learnHost };`)(os, net, dns, state, learnedHosts);
 
 let fails = 0;
 const check = (name, got, want) => {
@@ -135,6 +135,19 @@ for (const [raw, want] of [
 ]) {
   check(`type ${JSON.stringify(raw)}`, rules.relayType(raw), want);
 }
+
+// Learned hosts: at most 500, the one learned longest ago goes first, one learned again stays.
+// Last, because it empties the learned hosts the checks above use.
+learnedHosts.clear();
+for (let i = 0; i < 500; i++) rules.learnHost('h' + i);
+rules.learnHost('h0');   // learned again: moves to the end
+rules.learnHost('new');
+check('learned hosts stay at 500', learnedHosts.size, 500);
+check('host learned longest ago is dropped', learnedHosts.has('h1'), false);
+check('host learned again stays', learnedHosts.has('h0'), true);
+check('newest host is kept', learnedHosts.has('new'), true);
+rules.learnHost('h2');   // already learned: nothing is dropped
+check('learning a known host drops none', learnedHosts.size === 500 && learnedHosts.has('h3'), true);
 
 if (fails) { console.log(`${fails} check(s) failed.`); process.exit(1); }
 console.log('Relay rules: all checks passed.');
