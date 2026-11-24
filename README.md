@@ -97,6 +97,7 @@ Play up to 16 URLs at once on a TV (built for the Hisense 75QD7QF). You control 
 | Change the layout | Click a layout button. **Auto** fits the window count. |
 | Restart a stuck window | Click **↻**. |
 | Play files from the PC | Put files in the `media` folder. Click **Refresh list**, then **Add**. |
+| See what the TV shows | Click **Show preview**. It shows the windows as set on the PC, not choices made with the TV remote. Video players are muted; web pages may still play sound. It plays only while it is shown and the tab is in front. It uses extra network, because the PC plays every window too. |
 
 Changes appear on the TV in under 1 second.
 

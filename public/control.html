@@ -50,6 +50,8 @@
   .h.sw { left:0; bottom:0; cursor:nesw-resize; } .h.se { right:0; bottom:0; cursor:nwse-resize; }
   .guide { position:absolute; background:#ffcc33; z-index:999; display:none; pointer-events:none; }
   .gx { width:1px; top:0; bottom:0; } .gy { height:1px; left:0; right:0; }
+  #previewBox { margin-top:10px; }
+  #preview { display:block; width:100%; aspect-ratio:16/9; border:1px solid var(--line); border-radius:6px; background:#000; }
 </style>
 </head>
 <body>
@@ -59,8 +61,16 @@
     <div>On the TV browser, open:</div>
     <div class="tvaddr" id="tvaddr">…</div>
     <div class="status" id="status">Connecting…</div>
-    <div class="status">Preview on this PC: <a href="/tv" target="_blank">open TV view</a></div>
     <div class="row" style="margin-top:10px"><button id="quit" title="Stops the server. The TV stops getting updates.">Stop Split Screen</button></div>
+  </div>
+
+  <h2>Preview</h2>
+  <div class="panel">
+    <div class="row">
+      <button id="previewToggle" aria-expanded="false" aria-controls="previewBox">Show preview</button>
+      <span class="status" style="margin:0">The windows as set on this PC. Video players are muted; web pages may still play sound. It plays every window on this PC too, so it uses more network.</span>
+    </div>
+    <div id="previewBox" hidden><iframe id="preview" title="Preview of the TV"></iframe></div>
   </div>
 
   <h2>Add URLs</h2>
@@ -238,7 +248,11 @@ async function info() {
     $('status').innerHTML = s !== null && s < 40 ? '<span class="ok">● TV connected</span>' : '<span class="bad">● TV not connected yet</span>';
     lastStatuses = j.statuses || {};
     showStatuses();
-  } catch { $('status').innerHTML = '<span class="bad">● Split Screen is stopped. Start SplitScreen.exe (or start-split-screen.bat).</span>'; }
+    serverUp = true; syncPreview();
+  } catch {
+    $('status').innerHTML = '<span class="bad">● Split Screen is stopped. Start SplitScreen.exe (or start-split-screen.bat).</span>';
+    serverUp = false; syncPreview();
+  }
 }
 
 async function media() {
@@ -267,10 +281,36 @@ $('quit').onclick = async () => {
   try {
     const r = await fetch('/api/quit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    clearInterval(infoTimer);   // the status line it fills is gone now
     document.body.innerHTML = '<main><h1>Split Screen is stopped</h1><p>Start it again with SplitScreen.exe. You can close this tab.</p></main>';
   } catch (e) { $('err').textContent = 'Could not stop Split Screen: ' + e.message; }
 };
 $('newurls').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) addUrls(false); });
+
+// ---------- preview ----------
+// The TV page in preview mode (see tv.html). It plays only while it is shown, this tab is in
+// front, and Split Screen runs. Otherwise it is emptied, so it plays nothing (a stop from the
+// tray does not reach it). This browser remembers whether it was shown.
+let previewShown = false, serverUp = true;
+function syncPreview() {
+  const src = previewShown && serverUp && !document.hidden ? '/tv?preview=1' : 'about:blank';
+  if ($('preview').getAttribute('src') !== src) $('preview').setAttribute('src', src);
+}
+function showPreview(on) {
+  previewShown = on;
+  $('previewBox').hidden = !on;
+  $('previewToggle').textContent = on ? 'Hide preview' : 'Show preview';
+  $('previewToggle').setAttribute('aria-expanded', String(on));
+  syncPreview();
+  try { localStorage.setItem('splitscreen.preview', on ? '1' : '0'); } catch { /* storage blocked */ }
+}
+$('previewToggle').onclick = () => showPreview(!previewShown);
+// Back in front: ask the server first (timers in a hidden tab run rarely), so a stopped server
+// never gets the preview loaded.
+document.addEventListener('visibilitychange', () => { if (document.hidden) syncPreview(); else info(); });
+let previewWanted = false;
+try { previewWanted = localStorage.getItem('splitscreen.preview') === '1'; } catch { /* storage blocked */ }
+if (previewWanted) showPreview(true);
 
 // ---------- free layout editor ----------
 const SNAP = 0.02;      // snap distance: 2% of the screen
@@ -448,7 +488,7 @@ document.addEventListener('keydown', (e) => {
 });
 $('editor').addEventListener('pointerdown', (e) => { if (e.target.id === 'editor') { editSel = null; renderEditor(); } });
 
-render(); watch(); info(); media(); setInterval(info, 3000);
+render(); watch(); info(); media(); const infoTimer = setInterval(info, 3000);
 </script>
 </body>
 </html>

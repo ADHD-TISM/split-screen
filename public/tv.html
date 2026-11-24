@@ -26,6 +26,9 @@
   #idle b { color:#fff; font-size:44px; }
   #banner { position:fixed; left:50%; bottom:40px; transform:translateX(-50%); z-index:11; background:rgba(20,24,32,.92); border:2px solid #4f8cff; border-radius:12px; padding:14px 26px; font-size:26px; }
   #net { position:fixed; right:16px; top:12px; z-index:11; background:#b33; padding:6px 14px; border-radius:8px; font-size:20px; display:none; }
+  body.preview { cursor:default; font-size:16px; }
+  body.preview #banner { display:none !important; }
+  body.preview #idle b { font-size:28px; }
 </style>
 </head>
 <body>
@@ -37,6 +40,11 @@
 
 <script>
 (function () {
+  // Preview on the PC control page (/tv?preview=1 in a frame). It only shows the windows: it does
+  // not count as a TV, reports nothing, stays muted, ignores clicks and keys, and never asks for
+  // full screen.
+  var PREVIEW = /[?&]preview=1(&|$)/.test(location.search);
+  if (PREVIEW) document.body.classList.add('preview');
   var wall = document.getElementById('wall');
   var IDLE_TEXT = document.getElementById('idle').lastElementChild.textContent;   // from the markup
   var tiles = {};           // id -> { el, media, kind, key, src }
@@ -263,8 +271,9 @@
     if (isHls) ensureHls(play); else play();
   }
 
-  // Tell the PC what each window is doing, every 5 s.
-  setInterval(function () {
+  // Tell the PC what each window is doing, every 5 s. Not from the preview: that would hide what
+  // the real TV reports.
+  if (!PREVIEW) setInterval(function () {
     var report = {};
     state.windows.forEach(function (w) { if (tiles[w.id]) report[w.id] = String(tiles[w.id].status || ''); });
     var xhr = new XMLHttpRequest();
@@ -334,7 +343,8 @@
   // ---------- sync with the PC ----------
   function poll() {
     var xhr = new XMLHttpRequest();
-    xhr.open('GET', '/api/state?tv=1&v=' + state.version);
+    // tv=1 marks a real TV ("TV connected" on the control page), so the preview leaves it out.
+    xhr.open('GET', '/api/state?' + (PREVIEW ? '' : 'tv=1&') + 'v=' + state.version);
     xhr.timeout = 35000;
     xhr.onload = function () {
       document.getElementById('net').style.display = 'none';
@@ -364,6 +374,7 @@
       (window.innerHeight >= screen.height - 2 && window.innerWidth >= screen.width - 2);
   }
   function goFullscreen() {
+    if (PREVIEW) return;
     if (document.fullscreenElement || document.webkitFullscreenElement) return;
     var de = document.documentElement;
     var fs = de.requestFullscreen || de.webkitRequestFullscreen;
@@ -387,7 +398,10 @@
   goFullscreen();
   setTimeout(updateBanner, 500);
 
+  // true means "this press is used up". The preview uses up every press, so it never turns on
+  // sound and the TV remote choices (sound, full) stay as the PC set them.
   function activate() {
+    if (PREVIEW) return true;
     if (!activated) {
       activated = true;
       updateBanner();
@@ -413,6 +427,7 @@
   }
 
   document.addEventListener('keydown', function (e) {
+    if (PREVIEW) return;
     var k = e.key || '', code = e.keyCode;
     var ok = k === 'Enter' || code === 13 || code === 23;
     if (activate() && ok) { e.preventDefault(); return; }
@@ -447,8 +462,9 @@
     }
   });
 
-  // Keep remote key presses on this page, not inside an embedded player.
-  setInterval(function () {
+  // Keep remote key presses on this page, not inside an embedded player. Not in the preview: there
+  // it could pull the focus away from the control page.
+  if (!PREVIEW) setInterval(function () {
     var a = document.activeElement;
     if (a && a.tagName === 'IFRAME') { a.blur(); window.focus(); }
   }, 1000);
