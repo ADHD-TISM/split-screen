@@ -11,8 +11,8 @@ android {
         // Fire OS 7 is Android 9 (API 28). API 25 also covers older Fire TV sticks.
         minSdk 25
         targetSdk 34
-        versionCode 6
-        versionName '1.5'
+        versionCode 7
+        versionName '1.6'
     }
 
     buildTypes {

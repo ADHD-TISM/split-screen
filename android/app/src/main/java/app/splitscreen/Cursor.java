@@ -200,6 +200,32 @@ final class Cursor {
         arrow.setTranslationY(y - Arrow.TIP);
     }
 
+    // ---------- from the PC preview ----------
+
+    /** A click sent from the preview on the PC. The arrow moves there and shows the click. */
+    void tapAt(float px, float py) {
+        x = px; y = py;
+        place();
+        arrow.setVisibility(View.VISIBLE);
+        h.removeCallbacks(hide);
+        h.postDelayed(hide, on ? HIDE_MS : 1500);   // without cursor mode: only a short flash
+        click();
+    }
+
+    /**
+     * A scroll sent from the preview on the PC: dy window heights, + = down (like a wheel).
+     * The finger drags the other way, from (px, py). The arrow does not move.
+     */
+    void scrollAt(float px, float py, float dy) {
+        if (dy == 0 || Float.isNaN(dy)) return;   // a drag of 0 would be a tap
+        cancelGesture();
+        View target = windowAt(px, py);
+        if (target == null) return;
+        float dist = -dy * target.getHeight();
+        if (Math.abs(dist) < minDragPx) dist = Math.signum(dist) * minDragPx;
+        drag(px, py, py + dist);
+    }
+
     // ---------- synthetic gestures ----------
 
     private void click() {
@@ -221,9 +247,11 @@ final class Cursor {
         View target = windowAt(x, y);
         if (target == null) return;   // in a gap between windows: nothing to scroll
         float dist = Math.max(minDragPx, target.getHeight() * SCROLL_FRACTION);
-        final float y0 = y;
-        final float y1 = y0 + dir * dist;
-        final float px = x, start = y0;
+        drag(x, y, y + dir * dist);
+    }
+
+    /** A finger drag from (px, start) to (px, y1) in SCROLL_STEPS steps, then held and lifted. */
+    private void drag(final float px, final float start, final float y1) {
         final long t = SystemClock.uptimeMillis();
         touch(MotionEvent.ACTION_DOWN, t, t, px, start);
         for (int i = 1; i <= SCROLL_STEPS; i++) {

@@ -15,6 +15,7 @@ import { pipeline } from 'node:stream';
 import dgram from 'node:dgram';
 import * as sea from 'node:sea';
 import util from 'node:util';
+import crypto from 'node:crypto';
 
 // SplitScreen.exe (a Node single executable, see build-exe.mjs) keeps its pages inside the .exe,
 // and keeps state.json, media\ and SplitScreen.apk in the folder the .exe sits in.
@@ -155,6 +156,7 @@ async function saveState(text) {
 
 function setState(next) {
   state = { ...next, version: state.version + 1 };
+  inputs = [];   // clicks and scrolls were meant for the old window list
   const text = JSON.stringify(state, null, 2);
   unsavedText = text;   // the newest list; cleared when exactly this text reaches state.json
   saving = saving.then(() => saveState(text));
@@ -727,6 +729,32 @@ async function relayPlaylist(req, res, { up, ctrl, type, byType, finalUrl }) {
 // ---------- TV status reports ----------
 let tvStatuses = {};
 
+// ---------- clicks and scrolls from the preview ----------
+// The preview on the control page sends them (POST /api/input). Only TVs (tv=1) get them,
+// added to the window list they poll for; the version does not change and nothing is saved.
+// The TV app acts on each one once, by its number. A new run of the server has a new
+// inputsFrom, so the TV starts counting again. Each one lasts INPUT_TTL_MS, checked when it
+// is sent, so a TV that comes back later does not replay old ones.
+const inputsFrom = crypto.randomBytes(6).toString('hex');
+let inputSeq = 0;
+let inputs = [];
+const MAX_INPUTS = 20;          // kept at once
+// Shorter in the tests. Kept between 0.5 s and 60 s.
+const INPUT_TTL_MS = Math.min(60000, Math.max(500, Number(process.env.INPUT_TTL_MS) || 10000));
+function freshInputs() {
+  const now = Date.now();
+  inputs = inputs.filter((i) => now - i.at < INPUT_TTL_MS);
+  return inputs.map(({ at, ...i }) => i);
+}
+const tvState = () => ({ ...state, inputsFrom, inputs: freshInputs() });
+function pushInput(input) {
+  freshInputs();
+  inputs = inputs.slice(-(MAX_INPUTS - 1));
+  inputs.push({ ...input, seq: ++inputSeq, at: Date.now() });
+  // Wake only the TV apps that take inputs. Others have nothing new to show.
+  for (const w of [...waiters]) if (w.inputs) w(tvState());
+}
+
 // ---------- routes ----------
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
@@ -750,10 +778,19 @@ const server = http.createServer(async (req, res) => {
         if (isTv && since !== -1) return send(res, 200, stoppedPayload());
         return;
       }
-      if (!since || since !== state.version) return send(res, 200, state);
+      // The TV app (1.6 and later) also gets the clicks and scrolls from the preview. It sends
+      // "in", the last one it acted on, and gets an answer at once when a newer one waits.
+      // Without "in" (the TV web page, older apps) nothing changes: no inputs, no early answer.
+      const inRaw = url.searchParams.get('in');
+      const wantsInputs = isTv && inRaw !== null && /^-?\d{1,15}$/.test(inRaw);
+      const seen = wantsInputs ? Number(inRaw) : NaN;
+      const current = () => (wantsInputs ? tvState() : state);
+      const newInput = wantsInputs && inputs.length > 0 && Number.isFinite(seen) && freshInputs().some((i) => i.seq > seen);
+      if (!since || since !== state.version || newInput) return send(res, 200, current());
       // Long poll: answer when the state changes, or after LONG_POLL_MS.
-      const done = (payload) => { clearTimeout(t); waiters.delete(done); if (!res.writableEnded) send(res, 200, payload || state); };
+      const done = (payload) => { clearTimeout(t); waiters.delete(done); if (!res.writableEnded) send(res, 200, payload || current()); };
       done.tv = isTv;   // only TVs get the stop message (notifyStopped)
+      done.inputs = wantsInputs;   // only these are woken by a click or scroll (pushInput)
       const t = setTimeout(done, LONG_POLL_MS);
       waiters.add(done);
       req.on('close', () => { clearTimeout(t); waiters.delete(done); });
@@ -766,6 +803,24 @@ const server = http.createServer(async (req, res) => {
       const next = sanitize(JSON.parse(await readBody(req)));
       setState(next);
       return send(res, 200, state);
+    }
+    if (p === '/api/input' && req.method === 'POST') {
+      // A click (tap) or a scroll in 1 window, from the preview. x and y are the spot as a
+      // part of the window (0 to 1); dy is how far to scroll, in window heights (+ = down).
+      if (!isLocal(req) && !ALLOW_REMOTE_CONTROL) return send(res, 403, { error: 'Control is allowed from this PC only.' });
+      if (!isJson(req)) return send(res, 415, { error: 'Send JSON.' });
+      if (stopping) return send(res, 503, { error: 'Split Screen is stopping.' });
+      const b = JSON.parse(await readBody(req));
+      const id = String(b?.id ?? '');
+      if (!state.windows.some((w) => w.id === id)) return send(res, 400, { error: 'No such window.' });
+      const part = (v) => (Number.isFinite(v) ? Math.min(1, Math.max(0, Math.round(v * 10000) / 10000)) : null);
+      const x = part(b.x), y = part(b.y);
+      if (x === null || y === null) return send(res, 400, { error: 'Bad position.' });
+      const dy = Number.isFinite(b.dy) ? Math.min(3, Math.max(-3, Math.round(b.dy * 1000) / 1000)) : 0;
+      if (b.kind === 'tap') pushInput({ id, kind: 'tap', x, y });
+      else if (b.kind === 'scroll' && dy !== 0) pushInput({ id, kind: 'scroll', x, y, dy });
+      else return send(res, 400, { error: 'Bad input.' });
+      return send(res, 200, { ok: true });
     }
     if (p === '/api/info' && req.method === 'GET') {
       const tvSecondsAgo = tvLastSeen ? Math.round((Date.now() - tvLastSeen) / 1000) : null;

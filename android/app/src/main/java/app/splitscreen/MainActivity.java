@@ -49,7 +49,7 @@ public class MainActivity extends Activity {
 
     private volatile boolean running;
     private volatile String server;            // "ip:port"
-    private Thread worker;
+    private volatile Thread worker;
     private WifiManager.MulticastLock multicastLock;
 
     private JSONObject state;
@@ -115,6 +115,8 @@ public class MainActivity extends Activity {
         tiles.clear();
         version = 0;
         state = null;
+        inputSeen = -1;   // old clicks and scrolls are not replayed after a return
+        dropQueuedInputs();
         if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
     }
 
@@ -151,7 +153,11 @@ public class MainActivity extends Activity {
 
     private void syncLoop() {
         int failures = 0;
-        while (running) {
+        // interrupt() does not end a request that is waiting for the PC. After a quick return
+        // to the app a new thread takes over, and this one stops at its next step, so 2 threads
+        // never act on the same click.
+        Thread me = Thread.currentThread();
+        while (running && worker == me) {
             // 1. Find the PC: saved address first, then a network search.
             if (server == null || failures >= 3) {
                 if (server != null && Server.ping(server)) {
@@ -173,16 +179,21 @@ public class MainActivity extends Activity {
             }
             // 2. Long poll: the server answers at once on a change, else after 25 s.
             try {
-                String body = Server.get("http://" + server + "/api/state?tv=1&v=" + version, 35000);
+                // "in": the last preview click or scroll acted on, so a newer one comes at once.
+                String body = Server.get("http://" + server + "/api/state?tv=1&v=" + version + "&in=" + inputSeen, 35000);
+                if (!running || worker != me) break;   // left or replaced while waiting (see above)
                 JSONObject next = new JSONObject(body);
                 failures = 0;
+                // Counted here, before the next request leaves with the new "in".
+                List<JSONObject> todo = newInputs(next);
                 if (next.optInt("version") != version) {
-                    main.post(() -> apply(next));
+                    main.post(() -> { apply(next); runInputs(todo); });
                 } else {
-                    main.post(this::showIdleIfEmpty);
+                    // Same window list: maybe new clicks or scrolls from the preview.
+                    main.post(() -> { showIdleIfEmpty(); runInputs(todo); });
                 }
             } catch (Exception e) {
-                if (!running) break;
+                if (!running || worker != me) break;
                 failures++;
                 if (failures == 1) say(null);
                 if (failures >= 2) say("Reconnecting to the PC…");
@@ -213,11 +224,93 @@ public class MainActivity extends Activity {
         stoppedByPc = next.optBoolean("stopped", false);
         String oldAudio = state == null ? null : nullable(state, "audio");
         String oldSolo = state == null ? null : nullable(state, "solo");
+        // A 2nd answer with the same version (the poll ran ahead of this thread) is not a change.
+        boolean changed = next.optInt("version") != version;
         state = next;
         version = next.optInt("version");
         if (!eq(oldAudio, nullable(next, "audio"))) hasLocalAudio = false;
         if (!eq(oldSolo, nullable(next, "solo"))) hasLocalSolo = false;
+        if (changed) dropQueuedInputs();   // they were meant for the old window list
         render();
+    }
+
+    // ---------- clicks and scrolls from the PC preview ----------
+
+    /** The highest input number taken. -1: none seen yet, so the ones there now are skipped. */
+    private volatile long inputSeen = -1;
+    /** The server run the numbers belong to. A new run counts from 1 again. Poll thread only. */
+    private String inputsFrom = null;
+    private static final long GESTURE_GAP_MS = 260;   // 1 drag takes about 240 ms
+    private long nextGestureAt = 0;   // uptime: when the last queued gesture is done (main thread)
+
+    /**
+     * On the poll thread: the inputs in this answer that are new. A run of scrolls on 1 window
+     * becomes 1 scroll. A new server run (or the stop message, which has no inputsFrom) starts
+     * the count again, and the inputs there at first sight are skipped.
+     */
+    private List<JSONObject> newInputs(JSONObject next) {
+        String from = next.optString("inputsFrom", "");
+        if (!from.equals(inputsFrom)) { inputsFrom = from; inputSeen = -1; }
+        JSONArray list = next.optJSONArray("inputs");
+        boolean first = inputSeen < 0;
+        long top = Math.max(inputSeen, 0);
+        List<JSONObject> todo = new ArrayList<>();
+        if (list != null) {
+            for (int i = 0; i < list.length(); i++) {
+                JSONObject in = list.optJSONObject(i);
+                if (in == null) continue;
+                long seq = in.optLong("seq");
+                if (seq <= top) continue;
+                top = seq;
+                if (first) continue;
+                JSONObject last = todo.isEmpty() ? null : todo.get(todo.size() - 1);
+                if (last != null && "scroll".equals(in.optString("kind")) && "scroll".equals(last.optString("kind"))
+                        && in.optString("id").equals(last.optString("id"))) {
+                    try { last.put("dy", last.optDouble("dy", 0) + in.optDouble("dy", 0)); } catch (Exception ignored) { }
+                } else {
+                    todo.add(in);
+                }
+            }
+        }
+        inputSeen = top;
+        return todo;
+    }
+
+    /**
+     * On the main thread: runs the inputs in order, each after the gesture before it is done
+     * (also across answers). They run after the next layout pass, so a window that render()
+     * just moved is touched at its new place.
+     */
+    private void runInputs(List<JSONObject> todo) {
+        long now = android.os.SystemClock.uptimeMillis();
+        for (JSONObject in : todo) {
+            long at = Math.max(now, nextGestureAt);
+            nextGestureAt = at + GESTURE_GAP_MS;
+            main.postAtTime(() -> applyInput(in), inputToken, at);
+        }
+    }
+
+    /** Queued gestures carry this token, so a new window list or leaving the app drops them. */
+    private final Object inputToken = new Object();
+
+    private void dropQueuedInputs() {
+        main.removeCallbacksAndMessages(inputToken);
+        nextGestureAt = 0;
+    }
+
+    /** x and y are the spot in the window (0 to 1). Only a window shown now is touched. */
+    private void applyInput(JSONObject in) {
+        if (!running) return;
+        Tile t = tiles.get(in.optString("id"));
+        if (t == null || t.root.getVisibility() != View.VISIBLE || t.root.getWidth() <= 1) return;
+        // The server checks these too; checked again in case the app found the wrong PC.
+        double x = in.optDouble("x", Double.NaN), y = in.optDouble("y", Double.NaN), dy = in.optDouble("dy", 0);
+        if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(dy)) return;
+        int w = t.root.getWidth(), h = t.root.getHeight();
+        float px = t.root.getLeft() + (float) Math.min(Math.max(x, 0), 1) * (w - 1);
+        float py = t.root.getTop() + (float) Math.min(Math.max(y, 0), 1) * (h - 1);
+        if ("tap".equals(in.optString("kind"))) cursor.tapAt(px, py);
+        else if ("scroll".equals(in.optString("kind")) && dy != 0) cursor.scrollAt(px, py, (float) Math.min(Math.max(dy, -3), 3));
     }
 
     private static String nullable(JSONObject o, String k) {

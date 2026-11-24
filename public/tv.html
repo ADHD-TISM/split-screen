@@ -29,6 +29,10 @@
   body.preview { cursor:default; font-size:16px; }
   body.preview #banner { display:none !important; }
   body.preview #idle b { font-size:28px; }
+  body.preview #shield { cursor:pointer; }
+  .ping { position:fixed; z-index:12; width:24px; height:24px; margin:-12px 0 0 -12px; border:3px solid #4f8cff; border-radius:50%; pointer-events:none; animation:ping .5s ease-out forwards; }
+  .ping.bad { border-color:#ff6b6b; }
+  @keyframes ping { from { transform:scale(.4); opacity:1; } to { transform:scale(1.6); opacity:0; } }
 </style>
 </head>
 <body>
@@ -40,9 +44,9 @@
 
 <script>
 (function () {
-  // Preview on the PC control page (/tv?preview=1 in a frame). It only shows the windows: it does
-  // not count as a TV, reports nothing, stays muted, ignores clicks and keys, and never asks for
-  // full screen.
+  // Preview on the PC control page (/tv?preview=1 in a frame). It shows the windows: it does
+  // not count as a TV, reports nothing, stays muted, ignores keys, and never asks for full
+  // screen. Clicks and the mouse wheel go to the TV (see "Preview: a click" below).
   var PREVIEW = /[?&]preview=1(&|$)/.test(location.search);
   if (PREVIEW) document.body.classList.add('preview');
   var wall = document.getElementById('wall');
@@ -461,6 +465,63 @@
       }
     }
   });
+
+  // Preview: a click or the mouse wheel on a window is sent to the TV (POST /api/input). The
+  // Fire TV app then clicks or scrolls that window at the same spot. This page itself does not
+  // change: its copy of the window stays where it is.
+  if (PREVIEW) {
+    var shield = document.getElementById('shield');
+    var tileAt = function (x, y) {
+      var hit = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [];
+      for (var i = 0; i < hit.length; i++) {
+        for (var id in tiles) {
+          if (tiles[id].el === hit[i] && order.indexOf(id) >= 0) return { id: id, r: hit[i].getBoundingClientRect() };
+        }
+      }
+      return null;
+    };
+    // A ring where the click went: blue when the PC took it, red when it refused it (for
+    // example from another device without ALLOW_REMOTE_CONTROL).
+    var mark = function (x, y, ok) {
+      var d = document.createElement('div');
+      d.className = 'ping' + (ok ? '' : ' bad');
+      d.style.left = x + 'px'; d.style.top = y + 'px';
+      document.body.appendChild(d);
+      setTimeout(function () { d.remove(); }, 500);
+    };
+    var sendInput = function (o, x, y) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/input');
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      if (x != null) xhr.onloadend = function () { mark(x, y, xhr.status === 200); };
+      xhr.send(JSON.stringify(o));
+    };
+    shield.addEventListener('click', function (e) {
+      var t = tileAt(e.clientX, e.clientY);
+      if (!t) return;
+      sendInput({ id: t.id, kind: 'tap', x: (e.clientX - t.r.left) / t.r.width, y: (e.clientY - t.r.top) / t.r.height }, e.clientX, e.clientY);
+    });
+    // Wheel turns on 1 window are added up and sent at most 4 times a second. That is longer
+    // than 1 drag on the TV (about 240 ms), so drags do not cut each other short.
+    var wheel = null, wheelTimer = null;
+    var flushWheel = function () {
+      clearTimeout(wheelTimer); wheelTimer = null;
+      if (wheel && Math.abs(wheel.dy) >= 0.001) sendInput({ id: wheel.id, kind: 'scroll', x: wheel.x, y: wheel.y, dy: wheel.dy });
+      wheel = null;
+    };
+    shield.addEventListener('wheel', function (e) {
+      if (e.ctrlKey) return;   // a touchpad pinch (zoom), not a scroll
+      var t = tileAt(e.clientX, e.clientY);
+      if (!t) return;
+      e.preventDefault();   // over a window, the control page around the preview does not scroll
+      if (wheel && wheel.id !== t.id) flushWheel();
+      if (!wheel) wheel = { id: t.id, x: (e.clientX - t.r.left) / t.r.width, y: (e.clientY - t.r.top) / t.r.height, dy: 0 };
+      // Lines (Firefox, 3 per notch) count 33 px, so 1 notch is about 100 px in every browser.
+      var px = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * t.r.height : e.deltaY;
+      wheel.dy += px / t.r.height;
+      if (!wheelTimer) wheelTimer = setTimeout(flushWheel, 250);
+    }, { passive: false });
+  }
 
   // Keep remote key presses on this page, not inside an embedded player. Not in the preview: there
   // it could pull the focus away from the control page.

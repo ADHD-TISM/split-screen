@@ -101,7 +101,7 @@ let fails = 0;
 try {
   writeState(tmp);
   fs.mkdirSync(path.join(tmp, 'media'));
-  const env = { ...process.env, PORT: String(PORT), DISCOVERY_PORT: String(PORT + 9), OPEN_BROWSER: '0', TRAY: '0',
+  const env = { ...process.env, PORT: String(PORT), DISCOVERY_PORT: String(PORT + 9), OPEN_BROWSER: '0', TRAY: '0', INPUT_TTL_MS: '3000',
     STATE_FILE: path.join(tmp, 'state.json'), MEDIA_DIR: path.join(tmp, 'media') };
   srv = spawn(process.execPath, [server], { cwd: tmp, env, stdio: ['ignore', 'pipe', 'pipe'] });
   srv.stdout.on('data', (d) => { log += d; });
@@ -228,4 +228,42 @@ async function runChecks() {
     body: JSON.stringify({ layout: 'auto', windows: pops.map((popup, i) => ({ id: 'p' + i, url: `${UP}/page`, nonce: 0, popup })) }) });
   const kept = r.status === 200 ? (await r.json()).windows.map((w) => w.popup) : [];
   check('Close pop-up count checked', JSON.stringify(kept) === JSON.stringify([3, 999999999, null, null, null, null, null]), `${r.status} ${JSON.stringify(kept)}`);
+
+  // Clicks and scrolls from the preview: checked, numbered, sent only to TVs, not saved, and
+  // dropped by a change of the window list.
+  const input = (o) => fetch(`http://127.0.0.1:${PORT}/api/input`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o), signal: AbortSignal.timeout(20000) });
+  const getState = async (q) => (await fetch(`http://127.0.0.1:${PORT}/api/state${q}`, { signal: AbortSignal.timeout(20000) })).json();
+  const before = await getState('');
+  const codes = [];
+  for (const o of [{ id: 'p0', kind: 'tap', x: 0.25, y: 2 }, { id: 'p0', kind: 'scroll', x: 0.5, y: 0.5, dy: 9 },
+    { id: 'nope', kind: 'tap', x: 0, y: 0 }, { id: 'p0', kind: 'tap', x: 'a', y: 0 }, { id: 'p0', kind: 'zoom', x: 0, y: 0 },
+    { id: 'p0', kind: 'scroll', x: 0, y: 0, dy: 0 }, { id: 'p0', kind: 'scroll', x: 0, y: 0, dy: 0.0004 }]) {
+    codes.push((await input(o)).status);
+  }
+  check('inputs checked', JSON.stringify(codes) === JSON.stringify([200, 200, 400, 400, 400, 400, 400]), JSON.stringify(codes));
+  const plain = await getState('');
+  check('inputs not sent to control pages, version kept', !('inputs' in plain) && plain.version === before.version, `${plain.version} ${before.version}`);
+  const tv = await getState(`?tv=1&v=${before.version}&in=0`);
+  const ins = tv.inputs || [];
+  check('inputs sent to a TV at once', typeof tv.inputsFrom === 'string' && ins.length === 2 && ins[0].kind === 'tap' && ins[0].y === 1
+    && ins[1].dy === 3 && ins[1].seq === ins[0].seq + 1 && !('at' in ins[0]), JSON.stringify(ins));
+  // A TV page or older app (tv=1, no "in") still long-polls: no early answer, no inputs.
+  const old = await Promise.race([
+    fetch(`http://127.0.0.1:${PORT}/api/state?tv=1&v=${before.version}`, { signal: AbortSignal.timeout(2000) }).then(() => 'answered', () => 'aborted'),
+    new Promise((ok) => setTimeout(() => ok('waiting'), 600)),
+  ]);
+  check('a TV without "in" keeps waiting', old === 'waiting', old);
+  const saved = JSON.parse(fs.readFileSync(path.join(tmp, 'state.json'), 'utf8'));
+  check('inputs not saved', !('inputs' in saved), Object.keys(saved).join(','));
+  // They last INPUT_TTL_MS (3 s here), checked when sent: a TV that comes back later gets none.
+  await new Promise((ok) => setTimeout(ok, 3200));
+  const late = await getState(`?tv=1&in=0`);
+  check('old inputs expire', Array.isArray(late.inputs) && late.inputs.length === 0, JSON.stringify(late.inputs));
+  r = await input({ id: 'p0', kind: 'tap', x: 0.5, y: 0.5 });
+  const waiting = await getState('?tv=1&in=0');
+  check('a new input is sent', r.status === 200 && (waiting.inputs || []).length === 1, `${r.status} ${JSON.stringify(waiting.inputs)}`);
+  r = await fetch(`http://127.0.0.1:${PORT}/api/state`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(20000),
+    body: JSON.stringify({ layout: '1x1', windows: plain.windows }) });
+  const after = await getState('?tv=1&in=0');
+  check('a window list change drops inputs', r.status === 200 && Array.isArray(after.inputs) && after.inputs.length === 0, `${r.status} ${JSON.stringify(after.inputs)}`);
 }

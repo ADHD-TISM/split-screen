@@ -99,6 +99,7 @@ Play up to 16 URLs at once on a TV (built for the Hisense 75QD7QF). You control 
 | Close a pop-up in a web page | Click **✖ Pop-up** on that window. The Fire TV app removes the boxes that cover the page. Not in a TV web browser. |
 | Play files from the PC | Put files in the `media` folder. Click **Refresh list**, then **Add**. |
 | See what the TV shows | Click **Show preview**. It shows the windows as set on the PC, not choices made with the TV remote. Video players are muted; web pages may still play sound. It plays only while it is shown and the tab is in front. It uses extra network, because the PC plays every window too. |
+| Click or scroll a window on the TV | Click a window in the preview, or turn the mouse wheel over it. The Fire TV app (version 1.6 and later) clicks or scrolls that window at the same spot. The preview's own copy does not move: watch the TV. |
 
 Changes appear on the TV in under 1 second.
 
@@ -242,10 +243,11 @@ Split Screen has no passwords. It trusts the network it runs on.
 
 - Run it on a home network you trust. In Windows Firewall, allow it on **Private networks** only, never Public.
 - Anyone on the same network can see the window list (including any tokens inside stream links), play every file in `media`, and use the PC relay for the hosts in the window list and the hosts their playlists and redirects name.
-- `ALLOW_REMOTE_CONTROL=1` lets any device on the network change what the TV shows. Leave it off unless you need it.
+- `ALLOW_REMOTE_CONTROL=1` lets any device on the network change what the TV shows, and click and scroll inside the TV's web page windows (as the preview does), with any account signed in there. Leave it off unless you need it.
 - Add only stream and page links you trust. The PC fetches streams for the TV, and also the hosts a playlist names.
 - Known limit: the relay cannot tell your router's public internet address from any other public address. A playlist could make the PC send a plain request (GET) to it. The answer goes to the TV, not to the playlist's owner.
-- The TV app finds the PC by a network search and trusts the 1st PC that answers. If the TV shows the wrong PC, type the PC's address in the app's MENU dialog.
+- The TV app finds the PC by a network search and trusts the 1st PC that answers. That PC can also click and scroll inside the TV's web page windows. If the TV shows the wrong PC, type the PC's address in the app's MENU dialog.
+- Clicks and scrolls from the preview go to the TV with the window list. Any device on the network can read where you clicked, so do not type a PIN or password by clicking in the preview.
 - Get `SplitScreen.apk` and `SplitScreen.exe` only from this repository's Releases page. Official releases are built by the maintainer. To check an APK, run `apksigner verify --print-certs SplitScreen.apk` (Android SDK build-tools). The SHA-256 certificate digest must be `f03a3caa2cc1a11d82652b2cc812400fd963883d458ab31945b7dfc43fad5bee`.
 - Pull requests that change `SplitScreen.apk` or `android\gradle\wrapper\gradle-wrapper.jar` are not merged: binary files cannot be reviewed. The maintainer builds them.
 - To report a security problem, use **Report a vulnerability** on this repository's **Security** tab. Do not open a public issue for it.
