@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  body { font:14px/1.5 system-ui, Segoe UI, sans-serif; padding:12px; max-width:520px; }
+  input { font:inherit; padding:4px 6px; width:220px; }
+  .hint { color:#666; font-size:13px; }
+  #msg { margin-left:8px; }
+</style>
+</head>
+<body>
+<label>Split Screen on this PC: <input id="server" placeholder="127.0.0.1:8090"></label>
+<button id="save">Save</button><span id="msg"></span>
+<p class="hint">Use 127.0.0.1 or localhost with the port Split Screen shows on its control page (8090 unless that port was busy). Split Screen takes control only from this PC.</p>
+<script src="common.js"></script>
+<script src="options.js"></script>
+</body>
+</html>

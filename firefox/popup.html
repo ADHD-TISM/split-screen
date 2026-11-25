@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<nav>
+  <button data-tab="send" class="on">Send</button>
+  <button data-tab="windows">Windows</button>
+  <button data-tab="preview">Preview</button>
+  <button data-tab="streams">Streams <span id="streamCount"></span></button>
+</nav>
+<div class="status" id="status">Connecting…</div>
+
+<section id="send">
+  <div class="title" id="tabTitle"></div>
+  <div class="url" id="tabUrl"></div>
+  <div class="row">
+    <button class="primary" id="addTab">Add to TV</button>
+    <button id="replaceTab">Replace all</button>
+  </div>
+  <div class="hint">Right-click a page, link, video or image for <b>Send … to the TV</b>.</div>
+</section>
+
+<section id="windows" hidden>
+  <div class="row layouts" id="layouts"></div>
+  <div id="wins"></div>
+  <div class="row"><button id="muteAll">Mute all</button><button id="openControl">Open control page</button></div>
+</section>
+
+<section id="preview" hidden>
+  <!-- Sandboxed: the pages of the windows inside cannot open pop-ups or move this popup. -->
+  <iframe id="previewFrame" title="Preview of the TV" sandbox="allow-scripts allow-same-origin"></iframe>
+  <div class="hint">Click, scroll and move the mouse here to do it on the TV (Fire TV app 1.7 and later, with <b>Allow PC control</b> on; the TV's own picture needs 1.8).</div>
+</section>
+
+<section id="streams" hidden>
+  <div id="finderOff" hidden>
+    <div class="hint">The stream finder notes the video and stream addresses pages load, so you can send them to the TV. It needs to see every site's requests. Nothing leaves this browser except what you send; a sent address is saved on the PC like any window.</div>
+    <div class="row"><button class="primary" id="finderEnable">Turn on the stream finder</button></div>
+  </div>
+  <div id="finderOn" hidden>
+    <div id="found"></div>
+    <div class="hint">Reload the page if a stream is missing. Some streams need this browser's sign-in and do not play on the TV. <a href="#" id="finderDisable">Turn off</a></div>
+  </div>
+</section>
+
+<div class="err" id="err"></div>
+<script src="common.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>

@@ -212,6 +212,36 @@ If the app does not find the PC, press **MENU (≡)** and type the address from 
 - Alert and question boxes from a page are closed at once (OK for an alert, Cancel for a question).
 - For any other box, click **✖ Pop-up** on that window on the PC control page. It removes fixed boxes that cover the page. It keeps players (video, audio, a video in a frame), a bar along the top edge (often the site's menu), and a box that holds most of the page. A pop-up that plays a video is kept too. Click it again for a box that comes back. If it removed too much, click **↻** to reload the window.
 
+## Firefox extension
+
+The `firefox` folder holds a Firefox extension that works with Split Screen on the same PC. It adds a **Split Screen** button to the toolbar and items to the right-click menu.
+
+| Part | What it does |
+|---|---|
+| Right-click menu | **Send this page / link / video / image to the TV** adds it as a new window. A video that plays from a `blob:` address (most streaming sites) sends the page instead. |
+| **Send** tab | Adds the current tab to the TV, or replaces all windows with it (click **Replace all** 2 times). |
+| **Windows** tab | The window list with 🔊 Sound, ⛶ Full, ↻ Reload and ✕ Remove, the layout buttons, and **Mute all**. |
+| **Preview** tab | The live preview of the control page, smaller. Click, scroll and move the mouse on it to do it on the TV (Fire TV app 1.7 and later with **Allow PC control** on; the TV's own picture needs 1.8). |
+| **Streams** tab | The stream finder: the HLS streams (`.m3u8`) and video files the current page loads, each with **Send**. Pieces of a stream and DASH (`.mpd`), which the TV cannot play, are left out. The toolbar button shows how many it found. |
+
+**Install for a test** (until Firefox restarts):
+
+1. Start Split Screen on this PC.
+2. In Firefox, open `about:debugging#/runtime/this-firefox`.
+3. Click **Load Temporary Add-on…** and pick `firefox\manifest.json` in this folder.
+
+**Install to keep:** Firefox keeps only signed extensions.
+
+1. Zip the files inside `firefox` (not the folder itself), for example in PowerShell: `Compress-Archive -Path firefox\* -DestinationPath split-screen-firefox.zip`.
+2. On addons.mozilla.org, sign in (free Mozilla account), choose **Submit a new add-on**, then **On your own** (unlisted), and upload the zip. The add-on ID `split-screen@local` must be free there; if it is taken, change it in `manifest.json`.
+3. Download the signed `.xpi` and open it in Firefox.
+
+Firefox Developer Edition, Nightly and ESR can also run it unsigned with `xpinstall.signatures.required` set to `false` in `about:config`. That turns off the check for every add-on in that profile, so use a separate profile, or sign it.
+
+- If Split Screen runs on another port, set it in the extension's options (**about:addons > Split Screen > Options**). Only `127.0.0.1` and `localhost` work: Split Screen takes control only from this PC.
+- The stream finder is off until you turn it on in the **Streams** tab. Firefox then asks to let the extension see the requests of all sites. It keeps what it finds in this browser, per tab, until the tab loads a page again, closes, or Firefox closes. **Turn off** gives the permission back and forgets the lists. An address you send is saved on the PC like any window, so devices on the network can read it (see **Security**).
+- A found stream may not play on the TV: some sites need this browser's sign-in, cookies or a short-lived token. Then send the page instead.
+
 ## Live streams
 
 Paste any HLS link. The link must contain `.m3u8`, in the path or in the query.

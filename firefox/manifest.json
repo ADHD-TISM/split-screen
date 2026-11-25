@@ -1,0 +1,23 @@
+{
+  "manifest_version": 2,
+  "name": "Split Screen",
+  "version": "1.0.0",
+  "description": "Send pages, links, videos and streams to the TV, and control and watch the TV, with Split Screen running on this PC.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "split-screen@local",
+      "strict_min_version": "115.0",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  },
+  "icons": { "48": "icon.svg", "96": "icon.svg" },
+  "browser_action": {
+    "default_icon": "icon.svg",
+    "default_title": "Split Screen",
+    "default_popup": "popup.html"
+  },
+  "background": { "scripts": ["common.js", "background.js"], "persistent": false },
+  "options_ui": { "page": "options.html" },
+  "permissions": ["storage", "contextMenus", "activeTab", "http://127.0.0.1/*", "http://localhost/*"],
+  "optional_permissions": ["webRequest", "<all_urls>"]
+}
