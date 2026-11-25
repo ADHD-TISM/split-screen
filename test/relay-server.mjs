@@ -225,9 +225,13 @@ async function runChecks() {
   // number from 1 to 999999999.
   const pops = [3, 999999999, 0, -1, 1.5, 'x', 1e9];
   r = await fetch(`http://127.0.0.1:${PORT}/api/state`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(20000),
-    body: JSON.stringify({ layout: 'auto', windows: pops.map((popup, i) => ({ id: 'p' + i, url: `${UP}/page`, nonce: 0, popup })) }) });
-  const kept = r.status === 200 ? (await r.json()).windows.map((w) => w.popup) : [];
+    body: JSON.stringify({ layout: 'auto', solo: 'p0', windows: pops.map((popup, i) => ({ id: 'p' + i, url: `${UP}/page`, nonce: 0, popup, fill: [true, 1, 'true', false, null, {}, true][i] })) }) });
+  const keptWins = r.status === 200 ? (await r.json()).windows : [];
+  const kept = keptWins.map((w) => w.popup);
   check('Close pop-up count checked', JSON.stringify(kept) === JSON.stringify([3, 999999999, null, null, null, null, null]), `${r.status} ${JSON.stringify(kept)}`);
+  // Video full screen is kept only as true, and only for the window shown alone (p0, not p6).
+  const fills = keptWins.map((w) => w.fill);
+  check('Video full screen checked', JSON.stringify(fills) === JSON.stringify([true, null, null, null, null, null, null]), JSON.stringify(fills));
 
   // Clicks and scrolls from the preview: checked, numbered, sent only to TVs, not saved, and
   // dropped by a change of the window list.

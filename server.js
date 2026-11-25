@@ -109,6 +109,9 @@ function sanitize(input) {
     const out = { id, url, nonce };
     // Close pop-up count: the TV app clears the window's pop-ups each time it goes up.
     if (Number.isInteger(w?.popup) && w.popup > 0 && w.popup < 1e9) out.popup = w.popup;
+    // Video full screen: the TV app makes the page's video fill the window. Kept only for the
+    // window shown alone (below).
+    if (w?.fill === true) out.fill = true;
     // Free layout: position and size as fractions of the screen (0 to 1).
     const r = w?.rect;
     if (r && ['x', 'y', 'w', 'h'].every((k) => Number.isFinite(r[k]))) {
@@ -121,6 +124,7 @@ function sanitize(input) {
   });
   const audio = seen.has(input.audio) ? input.audio : null;
   const solo = seen.has(input.solo) ? input.solo : null;
+  for (const w of windows) if (w.fill && w.id !== solo) delete w.fill;
   return { layout, audio, solo, windows };
 }
 

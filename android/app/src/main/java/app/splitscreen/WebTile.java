@@ -122,6 +122,90 @@ final class WebTile extends Tile {
             + "if(gone){" + UNLOCK + "}"
             + "return gone;})()";
 
+    // Video full screen. The marked video (or player frame) covers the whole window; its parents
+    // lose what would trap it in a smaller box (transforms, clipping, a low stacking order).
+    private static final String FILL_CSS =
+            "[data-ss-fill]{position:fixed!important;left:0!important;top:0!important;right:auto!important;bottom:auto!important;"
+            + "width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;"
+            + "min-width:0!important;min-height:0!important;margin:0!important;padding:0!important;border:0!important;"
+            + "transform:none!important;z-index:2147483647!important;object-fit:contain!important;background:#000!important;"
+            + "visibility:visible!important;opacity:1!important;display:block!important}"
+            + "[data-ss-fillp]{transform:none!important;filter:none!important;backdrop-filter:none!important;perspective:none!important;"
+            + "contain:none!important;will-change:auto!important;clip-path:none!important;overflow:visible!important;"
+            + "z-index:2147483647!important;opacity:1!important;visibility:visible!important}"
+            + "html,body{overflow:hidden!important}";
+
+    // Hosts of video players that sites put in a frame, and their own subdomains.
+    private static final String PLAYER_HOSTS = "youtube.com youtube-nocookie.com vimeo.com dailymotion.com"
+            + " twitch.tv jwplayer.com jwplatform.com jwpcdn.com brightcove.net brightcove.com wistia.com wistia.net"
+            + " streamable.com rumble.com kick.com vk.com ok.ru bilibili.com";
+
+    // Picks the video. Sizes are parts of the window (so they compare the same before and after
+    // the window grows), for the marked one as it was before it was filled. Only what the page
+    // shows counts (not hidden, not see-through).
+    // 1. The biggest playing video at least half as big as the biggest video, else the biggest
+    //    video. A small looping ad or logo does not win over the main player.
+    // 2. The marked video stays unless another one plays: then that one takes over if it is at
+    //    least 2 times as big (the marked one plays) or half as big (the marked one is paused).
+    // 3. Frames: only video-shaped ones (width 1.2 to 2.5 times the height: not banner or
+    //    half-page ads, not side bars). A player from another site, 300 x 150 or bigger (from a
+    //    player host, PLAYER_HOSTS, or a host named player., embed., video. ...). Only the host
+    //    counts, not the rest of the address (ad addresses carry the page's address). With no
+    //    video of a tenth of the window or more: else a frame of a quarter of the window or more.
+    // A marked element the page hides (inside a box set to display:none) counts as gone.
+    // 4. A video wins over the frame only if it is at least half as big (a small looping video or
+    //    an ad player in the page does not replace a big player frame). A frame 2 times as big
+    //    takes over from the marked video or frame (a player that loads late).
+    // Looks again every second, as players load their video late, swap it, or move it.
+    // Off: everything is put back.
+    private static String fillJs(boolean on) {
+        return "(function(on){clearInterval(window.__ssFillT);"
+                + "function clear(){var s=document.getElementById('__ssFill');if(s)s.remove();"
+                + "document.querySelectorAll('[data-ss-fill],[data-ss-fillp]').forEach(function(e){"
+                + "e.removeAttribute('data-ss-fill');e.removeAttribute('data-ss-fillp');});}"
+                + "if(!on){clear();window.__ssFillE=null;return;}"
+                + "function vp(){return innerWidth*innerHeight||1;}"
+                + "function area(e){var r=e.getBoundingClientRect();return r.width*r.height/vp();}"
+                + "function size(e){return e&&e===window.__ssFillE&&e.hasAttribute('data-ss-fill')?window.__ssFillA||0:e?area(e):0;}"
+                + "function shown(e){if(e===window.__ssFillE&&e.getClientRects().length)return true;var c=getComputedStyle(e);"
+                + "return c.display!=='none'&&c.visibility!=='hidden'&&+c.opacity>0&&area(e)>0;}"
+                + "function big(list,ok){var b=null,bs=0;for(var i=0;i<list.length;i++){var e=list[i],a=size(e);"
+                + "if(a>bs&&shown(e)&&ok(e)){bs=a;b=e;}}return b;}"
+                + "function plays(e){return !e.paused&&!e.ended;}"
+                + "function any(){return true;}"
+                + "function playerHost(e){var s=e.getAttribute('src')||'',h='';"
+                + "if(!s||/^(about|javascript|data|blob):/i.test(s))return false;"
+                + "try{h=new URL(s,location.href).hostname;}catch(x){}"
+                + "if(!h||h===location.hostname)return false;"
+                + "return " + JSONQuote(PLAYER_HOSTS) + ".split(' ').some(function(p){return h===p||h.slice(-p.length-1)==='.'+p;})"
+                + "||/^(player|players|embed|video|videos)\\./.test(h);}"
+                + "function wide(e){if(e===window.__ssFillE)return true;var r=e.getBoundingClientRect(),q=r.width/(r.height||1);return q>=1.2&&q<=2.5;}"
+                + "function frame(hasVideo){var f=document.querySelectorAll('iframe');"
+                + "return big(f,function(e){return wide(e)&&playerHost(e)&&size(e)*vp()>=300*150;})"
+                + "||(hasVideo?null:big(f,function(e){return wide(e)&&size(e)>=0.25;}));}"
+                + "function pick(){var cur=window.__ssFillE,v=document.querySelectorAll('video');"
+                + "var top=big(v,any),playing=big(v,function(e){return plays(e)&&size(e)>=size(top)*0.5;}),video=playing||top;"
+                + "var f=frame(!!video&&size(video)>=0.1);"
+                + "if(cur&&cur.isConnected&&cur.getClientRects().length){"
+                + "if(cur.tagName==='VIDEO'){if(f&&size(f)>=size(cur)*2)return f;"
+                + "if(!playing||playing===cur)return cur;"
+                + "if(size(playing)<size(cur)*(plays(cur)?2:0.5))return cur;return playing;}"
+                + "if(video&&size(video)>=size(cur)*0.5)return video;"
+                + "return f&&f!==cur&&size(f)>=size(cur)*2?f:cur;}"
+                + "if(video&&(!f||size(video)>=size(f)*0.5))return video;"
+                + "return f;}"
+                + "function apply(){var e=pick();"
+                + "if(!e){var c=window.__ssFillE;if(c&&(!c.isConnected||!c.getClientRects().length)){clear();window.__ssFillE=null;}return;}"
+                + "var p=e.parentElement;"
+                + "if(e===window.__ssFillE&&e.hasAttribute('data-ss-fill')&&document.getElementById('__ssFill')"
+                + "&&(!p||p===document.documentElement||p.hasAttribute('data-ss-fillp')))return;"
+                + "var a=size(e);clear();window.__ssFillE=e;window.__ssFillA=a;"
+                + "var st=document.createElement('style');st.id='__ssFill';st.textContent=" + JSONQuote(FILL_CSS) + ";"
+                + "(document.head||document.documentElement).appendChild(st);e.setAttribute('data-ss-fill','');"
+                + "for(var p=e.parentElement;p&&p!==document.documentElement;p=p.parentElement)p.setAttribute('data-ss-fillp','');}"
+                + "apply();window.__ssFillT=setInterval(apply,1000);})(" + on + ")";
+    }
+
     private final WebView web;
     private final boolean player;   // true for YouTube / Vimeo: sound can be controlled
     private final boolean page;     // true for a web page (not a player or an image)
@@ -182,6 +266,7 @@ final class WebTile extends Tile {
             @Override public void onPageFinished(WebView v, String u) {
                 status = "page loaded";
                 if (player) setAudible(audible);   // the page was not ready for earlier calls
+                if (page && fill) web.evaluateJavascript(fillJs(true), null);   // a new page in the window
             }
             // A click in a YouTube / Vimeo window must not replace the player page: the app
             // would lose mute control (and the YouTube format limit) for that window.
@@ -246,6 +331,14 @@ final class WebTile extends Tile {
     @Override void closePopup() {
         if (!page) return;
         web.evaluateJavascript(CLOSE_POPUP_JS, null);
+    }
+
+    private boolean fill;
+
+    @Override void setFill(boolean on) {
+        if (!page || on == fill) return;
+        fill = on;
+        web.evaluateJavascript(fillJs(on), null);
     }
 
     private void frame(String src) {

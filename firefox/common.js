@@ -75,6 +75,21 @@ function fillRects(wins) {
   });
 }
 
+// A window the TV app shows as a web page (not a player, stream, file or image), as on the
+// control page. Only these have pop-ups to close and a video to make full screen.
+function isWebPageTile(url) {
+  if (url.startsWith('/')) return false;
+  if (/\.m3u8/i.test(url) || /\.(mp4|webm|ogv|mov|m4v|mkv|ts|mp3|m4a|aac|ogg|wav|flac)(\?|#|$)/i.test(url)) return false;
+  if (/(?:youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/|v\/)|youtu\.be\/)[A-Za-z0-9_-]{6,}/.test(url)) return false;
+  if (/vimeo\.com\/(?:video\/)?\d{5,}/.test(url)) return false;
+  return !/\.(jpe?g|png|gif|webp|avif|svg)(\?|#|$)/i.test(url);
+}
+
+// Live streams and video or audio files, on the web or on the PC: what Stop all streams removes.
+function isStream(url) {
+  return /\.m3u8/i.test(url) || /\.(mp4|webm|ogv|mov|m4v|mkv|ts|mp3|m4a|aac|ogg|wav|flac)(\?|#|$)/i.test(url);
+}
+
 // What a link is, as on the control page.
 function kindOf(url) {
   if (url.startsWith('/media/')) return 'File on the PC';

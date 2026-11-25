@@ -121,6 +121,14 @@ Changes appear on the TV in under 1 second.
 
 ## Full screen
 
+On the control page and in the Firefox extension:
+
+- **⛶ Full** shows only that window. Press it again to show all windows.
+- **📺 Video** (web page windows) shows only that window, and the page's video fills the TV. Press it again to show all windows. Press ⛶ Full to see the whole page. It needs the Fire TV app 1.9 or later. The app picks the biggest video of the page, or a player frame (YouTube, Vimeo, Twitch and others) when it is more than 2 times as big. A small video that plays next to a bigger one is left out, and so are banner-shaped frames. With no big video and no player frame, the biggest video-shaped frame (a quarter of the TV or bigger) fills the TV. YouTube, Vimeo and stream windows fill their window already.
+- Known limit: a site that blocks added styles (a strict Content-Security-Policy) keeps its video in the page.
+
+On the TV:
+
 - The TV page goes full screen when you press any button on the remote.
 - If the TV leaves full screen, a prompt appears. Press any button to return.
 - Browsers block full screen until the viewer presses a button. To skip that press, do 1 of these:
@@ -220,9 +228,9 @@ The `firefox` folder holds a Firefox extension that works with Split Screen on t
 |---|---|
 | Right-click menu | **Send this page / link / video / image to the TV** adds it as a new window. A video that plays from a `blob:` address (most streaming sites) sends the page instead. |
 | **Send** tab | Adds the current tab to the TV, or replaces all windows with it (click **Replace all** 2 times). |
-| **Windows** tab | The window list with 🔊 Sound, ⛶ Full, ↻ Reload and ✕ Remove, the layout buttons, and **Mute all**. |
+| **Windows** tab | The window list with 🔊 Sound, 📺 Video full screen, ⛶ Full, ↻ Reload and ✕ Remove, the layout buttons, **Mute all**, and **Stop all streams** (removes every live stream and video or audio file window, also files on the PC). 📺 shows only on web page windows. |
 | **Preview** tab | The live preview of the control page, smaller. Click, scroll and move the mouse on it to do it on the TV (Fire TV app 1.7 and later with **Allow PC control** on; the TV's own picture needs 1.8). |
-| **Streams** tab | The stream finder: the HLS streams (`.m3u8`) and video files the current page loads, each with **Send**. Pieces of a stream and DASH (`.mpd`), which the TV cannot play, are left out. The toolbar button shows how many it found. |
+| **Streams** tab | The stream finder: the HLS streams (`.m3u8`) and video files the current page loads, each with **Send**, or **Stop** when it plays on the TV. Pieces of a stream and DASH (`.mpd`), which the TV cannot play, are left out. The toolbar button shows how many it found. |
 
 **Install for a test** (until Firefox restarts):
 

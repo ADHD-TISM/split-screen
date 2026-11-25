@@ -437,6 +437,8 @@ public class MainActivity extends Activity {
                 if (t.popupSeen >= 0) t.closePopup();
                 t.popupSeen = popup;
             }
+            // Only while this window is shown alone (also after BACK on the remote shows all).
+            t.setFill(w.optBoolean("fill", false) && id.equals(solo));
             int idx = shown.indexOf(w);
             float x, y, fw, fh;
             boolean visible, small = false;

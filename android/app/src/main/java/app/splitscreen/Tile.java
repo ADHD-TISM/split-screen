@@ -92,6 +92,10 @@ abstract class Tile {
     /** The Close pop-up button on the PC. Only web page windows do anything. */
     void closePopup() {}
 
+    /** Video full screen on the PC: the page's video fills the window. Only web page windows
+     *  do anything (players and streams fill their window already). */
+    void setFill(boolean on) {}
+
     /** The last Close pop-up count seen for this window. -1: none seen yet. */
     int popupSeen = -1;
 

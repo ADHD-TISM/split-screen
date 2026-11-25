@@ -204,7 +204,7 @@ function render() {
     const num = document.createElement('div'); num.className = 'num'; num.textContent = i + 1;
     const mid = document.createElement('div');
     const inp = document.createElement('input'); inp.type = 'text'; inp.value = w.url;
-    inp.onchange = () => { const v = normalize(inp.value); if (v) update((n) => { n.windows[i].url = v; }); };
+    inp.onchange = () => { const v = normalize(inp.value); if (v) update((n) => { n.windows[i].url = v; delete n.windows[i].fill; }); };
     const kind = document.createElement('div'); kind.className = 'kind'; kind.textContent = kindOf(w.url);
     const st = document.createElement('span'); st.className = 'tvstat'; st.dataset.id = w.id;
     kind.append(st);
@@ -215,7 +215,19 @@ function render() {
       if (on) b.className = 'on'; if (disabled) b.disabled = true; b.onclick = fn; tools.append(b);
     };
     btn('🔊 Sound', 'Play sound from this window', () => update((n) => { n.audio = n.audio === w.id ? null : w.id; }), state.audio === w.id);
-    btn('⛶ Full', 'Show only this window', () => update((n) => { n.solo = n.solo === w.id ? null : w.id; }), state.solo === w.id);
+    btn('⛶ Full', 'Show only this window', () => update((n) => {
+      // The plain window: its video stays in the page.
+      n.solo = n.solo === w.id && !w.fill ? null : w.id;
+      for (const v of n.windows) delete v.fill;
+    }), state.solo === w.id && !w.fill);
+    // Only this window, and the page's video fills the TV (Fire TV app 1.9). Again: back.
+    if (isWebPageTile(w.url)) {
+      btn('📺 Video', 'Video full screen: only this window, its video fills the TV (Fire TV app 1.9)', () => update((n) => {
+        const on = n.solo === w.id && n.windows[i].fill;
+        for (const v of n.windows) delete v.fill;
+        if (on) n.solo = null; else { n.windows[i].fill = true; n.solo = w.id; }
+      }), state.solo === w.id && !!w.fill);
+    }
     btn('↻', 'Reload this window', () => update((n) => { n.windows[i].nonce++; }));
     // Web pages only. The Fire TV app removes what covers the page; a TV web browser cannot.
     if (isWebPageTile(w.url)) {

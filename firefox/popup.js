@@ -113,7 +113,14 @@ function renderWindows() {
       b.onclick = fn; tools.append(b);
     };
     btn('🔊', 'Sound from this window', () => update((n) => { n.audio = n.audio === w.id ? null : w.id; }), state.audio === w.id);
-    btn('⛶', 'Show only this window', () => update((n) => { n.solo = n.solo === w.id ? null : w.id; }), state.solo === w.id);
+    if (isWebPageTile(w.url)) {
+      btn('📺', 'Video full screen: only this window, its video fills the TV (Fire TV app 1.9)', () => update((n) => fullScreen(n, w.id)), state.solo === w.id && !!w.fill);
+    }
+    btn('⛶', 'Show only this window', () => update((n) => {
+      // The plain window: its video stays in the page.
+      n.solo = n.solo === w.id && !w.fill ? null : w.id;
+      for (const v of n.windows) delete v.fill;
+    }), state.solo === w.id && !w.fill);
     btn('↻', 'Reload this window', () => update((n) => { const x = n.windows.find((v) => v.id === w.id); if (x) x.nonce++; }));
     btn('✕', 'Remove', () => update((n) => {
       n.windows = n.windows.filter((v) => v.id !== w.id);
@@ -124,18 +131,50 @@ function renderWindows() {
   });
 }
 $('muteAll').onclick = () => update((n) => { n.audio = null; });
+$('stopStreams').onclick = () => run(async () => {
+  const s = await getState();
+  const left = s.windows.filter((v) => !isStream(v.url));
+  const gone = s.windows.length - left.length;
+  if (!gone) { showDone('No streams on the TV.'); return; }
+  const next = { layout: s.layout, audio: s.audio, solo: s.solo, windows: left };
+  dropGone(next);
+  state = await saveState(next);
+  renderWindows(); refresh();
+  showDone(gone === 1 ? 'Stopped 1 stream.' : 'Stopped ' + gone + ' streams.');
+});
+
+// Video full screen on, or off when it is on for this window. Only 1 window at a time.
+function fullScreen(n, id) {
+  const x = n.windows.find((v) => v.id === id);
+  if (!x) return;
+  const on = n.solo === id && x.fill;
+  for (const v of n.windows) delete v.fill;
+  if (on) { n.solo = null; return; }
+  x.fill = true; n.solo = id;
+}
+// Sound and "only this window" may not point at a removed window.
+function dropGone(n) {
+  const ids = new Set(n.windows.map((v) => v.id));
+  if (!ids.has(n.audio)) n.audio = null;
+  if (!ids.has(n.solo)) n.solo = null;
+}
 $('openControl').onclick = async () => { browser.tabs.create({ url: await serverBase() + '/' }); window.close(); };
 
 // ---------- Streams ----------
 const FINDER = { permissions: ['webRequest'], origins: ['<all_urls>'] };
 
+let streamsTurn = 0;
 async function showStreams() {
+  const turn = ++streamsTurn;   // only the latest call draws the list
   const on = await browser.permissions.contains(FINDER);
   $('finderOff').hidden = on;
   $('finderOn').hidden = !on;
   if (!on || !tab) return;
   const key = 'found:' + tab.id;
   const list = (await browser.storage.session.get(key))[key] || [];
+  // Which found streams play on the TV now: those get Stop instead of Send.
+  const onTv = new Set((await getState().catch(() => ({ windows: [] }))).windows.map((w) => w.url));
+  if (turn !== streamsTurn) return;
   $('streamCount').textContent = list.length ? '(' + list.length + ')' : '';
   const box = $('found'); box.textContent = '';
   if (!list.length) {
@@ -148,8 +187,19 @@ async function showStreams() {
     const u = document.createElement('div'); u.className = 'url'; u.textContent = f.url; u.title = f.url;
     const k = document.createElement('div'); k.className = 'kind'; k.textContent = f.kind || kindOf(f.url);
     mid.append(u, k);
-    const b = document.createElement('button'); b.textContent = 'Send';
-    b.onclick = () => run(async () => { await sendToTv([f.url]); showDone('Stream sent to the TV.'); });
+    const b = document.createElement('button');
+    if (onTv.has(f.url)) {
+      b.textContent = 'Stop';
+      b.onclick = () => run(async () => {
+        const s = await getState();
+        const next = { layout: s.layout, audio: s.audio, solo: s.solo, windows: s.windows.filter((w) => w.url !== f.url) };
+        dropGone(next);
+        await saveState(next); showDone('Stream stopped on the TV.'); showStreams(); refresh();
+      });
+    } else {
+      b.textContent = 'Send';
+      b.onclick = () => run(async () => { await sendToTv([f.url]); showDone('Stream sent to the TV.'); showStreams(); });
+    }
     row.append(mid, b); box.append(row);
   }
 }
